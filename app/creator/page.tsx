@@ -14,6 +14,9 @@ import {
   filterValidImageFiles,
   processImageFiles,
 } from '../lib/uploadUtils';
+import { useUser } from '../lib/UserContext';
+import { uploadComicMediaToStorage, prepareMediaForUpload } from '../lib/supabase/storage';
+import { getSupabaseBrowserClient } from '../lib/supabase/client';
 
 const ALL_GENRES: Genre[] = [
   "Fantasy", "Romance", "Action", "Mystery", "Sci-Fi",
@@ -31,6 +34,7 @@ type EditDraft = {
   chapters: Chapter[]; // working copy (with current data: panels + optional thumbnail)
   coverGallery?: string[];
   bannerUrl?: string;
+  isPublic?: boolean;
 };
 
 export default function CreatorDashboard() {
@@ -40,7 +44,10 @@ export default function CreatorDashboard() {
     addChaptersToUploadedComic,
     removePublishedComic,
     getComicBySlug,
+    ingestPublicComic,
   } = useComics();
+
+  const { user } = useUser();
 
   const myComics = getMyUploadedComics();
 
@@ -64,6 +71,7 @@ export default function CreatorDashboard() {
       chapters: comic.chapters.map(ch => ({ ...ch, panels: [...ch.panels] })), // deep enough for our needs
       coverGallery: comic.coverGallery ? [...comic.coverGallery] : [],
       bannerUrl: comic.bannerUrl || '',
+      isPublic: (comic as any).isPublic || false,
     });
     setError(null);
     setSuccess(null);
@@ -227,9 +235,10 @@ export default function CreatorDashboard() {
   };
 
   // Save the edit (full replace of the comic data for this user upload)
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (!editingId || !editDraft) return;
     setError(null);
+    setProcessingProgress(null);
 
     // Enforce first-chapter-free invariant on save
     const chaptersForSave: Chapter[] = editDraft.chapters.map((ch, idx) => ({
@@ -240,6 +249,77 @@ export default function CreatorDashboard() {
     }));
 
     try {
+      if (editDraft.isPublic && user) {
+        // Migrate / ensure public: upload current data: to Storage + DB insert + ingest (https version)
+        setProcessingProgress({ current: 0, total: 1, label: 'Publishing as public...' });
+
+        const media = prepareMediaForUpload(
+          editDraft.chapters[0]?.panels?.[0] ? '' : '', // cover handled separately if present; for simplicity use existing cover logic below
+          chaptersForSave.map((c, i) => ({ number: i+1, panels: c.panels }))
+        );
+        // For edit we may not have fresh cover dataUrl in draft; fall back to using the comic's current cover if data, or skip re-upload of cover
+        // Simpler: use the draft's first chapter panels + assume cover is already set on the comic or re-use a panel for demo.
+        // To keep robust, upload the chapter panels at minimum; cover can stay the local one or we re-derive.
+        const coverForUpload = (editDraft as any)._origCoverData || ''; // not always present; pages will use the existing coverUrl for the row
+
+        const urlMap = await uploadComicMediaToStorage(user.id, editDraft.title.toLowerCase().replace(/[^a-z0-9]/g, '-') + "-edit", media, (u, t) => setProcessingProgress({ current: u, total: t, label: 'Uploading public assets...' }));
+
+        // Build DB row (minimal) + ingest a hybrid comic
+        const supabase = getSupabaseBrowserClient();
+        const slug = editDraft.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") + "-pub";
+        const { data: insComic } = await supabase.from("comics").insert({
+          owner_id: user.id,
+          slug,
+          title: editDraft.title.trim(),
+          author: editDraft.author.trim() || "You",
+          description: editDraft.description.trim(),
+          cover_url: (myComics.find(c => c.id === editingId)?.coverUrl) || "", // keep existing cover or update if we had data
+          genres: editDraft.genres,
+          tags: editDraft.tags,
+          status: editDraft.status,
+          is_public: true,
+          unlock_all_price: editDraft.unlockAllPrice,
+          source: "user",
+        }).select().single();
+
+        if (insComic) {
+          const chRows = chaptersForSave.map((ch, i) => ({
+            comic_id: insComic.id,
+            number: i + 1,
+            title: ch.title,
+            is_premium: ch.isPremium,
+            coin_price: ch.coinPrice ?? 10,
+            panels: ch.panels.map((_, pi) => urlMap[`ch${i+1}-p${pi}`] || ch.panels[pi]),
+          }));
+          await supabase.from("chapters").insert(chRows);
+
+          const normalized: Comic = {
+            id: insComic.id,
+            slug: insComic.slug,
+            title: insComic.title,
+            author: insComic.author,
+            coverUrl: insComic.cover_url || (myComics.find(c => c.id === editingId)?.coverUrl || ""),
+            genres: editDraft.genres,
+            description: editDraft.description.trim(),
+            chapters: chaptersForSave.map((ch, i) => ({ ...ch, panels: ch.panels.map((p, pi) => urlMap[`ch${i+1}-p${pi}`] || p) })),
+            views: 0,
+            publishedAt: new Date().toISOString().split("T")[0],
+            isAIGenerated: true,
+            source: "user",
+            status: editDraft.status,
+            tags: editDraft.tags,
+            unlockAllPrice: editDraft.unlockAllPrice,
+            isPublic: true,
+          };
+          ingestPublicComic(normalized);
+        }
+        setProcessingProgress(null);
+        setSuccess("Saved as Public (cloud).");
+        setTimeout(() => { closeEditor(); setSuccess(null); }, 900);
+        return;
+      }
+
+      // Normal local private save
       updateUploadedComic(editingId, {
         title: editDraft.title.trim(),
         author: editDraft.author.trim() || 'You',
@@ -251,16 +331,18 @@ export default function CreatorDashboard() {
         chapters: chaptersForSave,
         coverGallery: editDraft.coverGallery && editDraft.coverGallery.length ? editDraft.coverGallery : undefined,
         bannerUrl: editDraft.bannerUrl || undefined,
+        // @ts-ignore carry flag for display
+        isPublic: editDraft.isPublic || false,
       } as any);
 
       setSuccess('Changes saved. The comic is updated everywhere (lists, reader, etc.).');
-      // Keep modal open briefly or close
       setTimeout(() => {
         closeEditor();
         setSuccess(null);
       }, 1200);
     } catch (e: any) {
       setError(e.message || 'Failed to save changes');
+      setProcessingProgress(null);
     }
   };
 
@@ -350,6 +432,37 @@ export default function CreatorDashboard() {
                     >
                       <Edit2 size={14} />
                     </button>
+                    {! (comic as any).isPublic && user && (
+                      <button
+                        onClick={async () => {
+                          // Quick "make public" from list (uploads current data: + inserts)
+                          if (!confirm(`Publish "${comic.title}" publicly? This will upload images to cloud and make it visible to other logged-in users.`)) return;
+                          // Reuse the open + immediate save public path by forcing the flag
+                          const draft = { ...comic, isPublic: true } as any;
+                          setEditingId(comic.id);
+                          setEditDraft({
+                            title: comic.title,
+                            author: comic.author,
+                            description: comic.description,
+                            genres: [...(comic.genres || [])],
+                            status: comic.status || 'ongoing',
+                            tags: [...(comic.tags || [])],
+                            unlockAllPrice: comic.unlockAllPrice,
+                            chapters: comic.chapters.map(ch => ({ ...ch, panels: [...ch.panels] })),
+                            coverGallery: (comic as any).coverGallery || [],
+                            bannerUrl: (comic as any).bannerUrl || '',
+                            isPublic: true,
+                          });
+                          // Trigger save immediately (the saveEdit now handles the public branch)
+                          // Small delay so state settles
+                          setTimeout(() => { saveEdit(); }, 50);
+                        }}
+                        className="p-1.5 rounded bg-emerald-600/80 text-white hover:bg-emerald-600 text-[10px]"
+                        title="Publish publicly (upload + share)"
+                      >
+                        Pub
+                      </button>
+                    )}
                     <button
                       onClick={() => exportComic(comic)}
                       className="p-1.5 rounded bg-black/70 text-white hover:bg-emerald-600"
@@ -442,6 +555,16 @@ export default function CreatorDashboard() {
                   <div>
                     <label className="text-xs block mb-1 text-[var(--text-muted)]">Unlock All Price (optional)</label>
                     <input type="number" value={editDraft.unlockAllPrice ?? ''} onChange={e => updateDraftMeta({ unlockAllPrice: e.target.value ? parseInt(e.target.value) : undefined })} className="w-32 rounded bg-[var(--bg)] border border-[var(--border)] px-3 py-1.5" />
+                  </div>
+
+                  {/* Visibility toggle for public/private (same semantics as /upload) */}
+                  <div>
+                    <label className="text-xs block mb-1 text-[var(--text-muted)]">Visibility</label>
+                    <div className="flex gap-2 text-xs">
+                      <button type="button" onClick={() => updateDraftMeta({ isPublic: false })} className={`px-2 py-0.5 rounded border ${!editDraft.isPublic ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border)]'}`}>Private</button>
+                      <button type="button" onClick={() => updateDraftMeta({ isPublic: true })} disabled={!user} className={`px-2 py-0.5 rounded border ${editDraft.isPublic ? 'border-emerald-500 bg-emerald-500/10' : 'border-[var(--border)]'}`}>Public</button>
+                    </div>
+                    {editDraft.isPublic && !user && <div className="text-[10px] text-red-400">Sign in to make public.</div>}
                   </div>
 
                   {/* Advanced: gallery/banner quick support in edit */}

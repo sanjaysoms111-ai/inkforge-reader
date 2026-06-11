@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export function Footer() {
   return (
     <footer className="border-t border-zinc-800 bg-zinc-950 py-10 text-sm text-zinc-500">
@@ -10,7 +12,9 @@ export function Footer() {
           </div>
 
           <div className="flex gap-6">
-            <a href="#disclaimer" className="hover:text-zinc-400">AI Content Disclaimer</a>
+            <Link href="/legal" className="hover:text-zinc-400">Legal &amp; Disclaimers</Link>
+            <span className="text-zinc-700">•</span>
+            <a href="#disclaimer" className="hover:text-zinc-400">AI Note</a>
             <span className="text-zinc-700">•</span>
             <span>Demo • No real payments</span>
           </div>

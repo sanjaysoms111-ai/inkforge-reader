@@ -6,6 +6,7 @@ import { ArrowLeft, BookOpen, Eye, Trash2 } from "lucide-react";
 import { motion } from "framer-motion";
 import { Suspense } from "react";
 import { useComics } from "../../lib/ComicsContext";
+import { useUser } from "../../lib/UserContext";
 import { ChapterListItem } from "../../components/ChapterListItem";
 import { SmartImage } from "../../components/SmartImage";
 import { ChapterListSkeleton } from "../../components/Skeleton";
@@ -47,6 +48,8 @@ export default function ComicDetailPage() {
   // Allow deleting legacy user-published (via removed /publish) and imported creator comics
   // (these live in the user's local storage)
   const canDelete = comic.id.startsWith('pub-') || comic.source === 'creator';
+
+  const { isChapterUnlocked: userIsChapterUnlocked } = useUser ? useUser() : { isChapterUnlocked: () => true } as any;
 
   const handleReadChapter = (chapterNumber: number) => {
     router.push(`/read/${comic.slug}/${chapterNumber}`);
@@ -168,6 +171,12 @@ export default function ComicDetailPage() {
               This comic was created using AI on inkforg_apexpanel.
             </div>
           )}
+
+          {comic.isPublic && (
+            <div className="mt-4 text-[10px] text-center text-amber-400/70">
+              By uploading, you confirm all content is original and does not infringe any copyrights. Violations may lead to content removal and account suspension.
+            </div>
+          )}
         </div>
       </div>
 
@@ -184,9 +193,9 @@ export default function ComicDetailPage() {
               <ChapterListItem
                 key={chapter.id}
                 chapter={chapter}
-                isUnlocked={true}
+                isUnlocked={userIsChapterUnlocked(comic.slug, chapter.number) || chapter.number === 1 || !chapter.isPremium}
                 onRead={() => handleReadChapter(chapter.number)}
-                onUnlock={() => {}} // no-op, monetizing removed; isPremium is display only
+                onUnlock={() => { /* handled in reader or via UserContext spend */ }}
               />
             ))}
           </div>

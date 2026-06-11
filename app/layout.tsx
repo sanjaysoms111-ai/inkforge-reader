@@ -5,6 +5,7 @@ import { Navbar } from "./components/Navbar";
 import { Footer } from "./components/Footer";
 import { ComicsProvider } from "./lib/ComicsContext";
 import { ThemeProvider } from "./lib/ThemeContext";
+import { UserProvider } from "./lib/UserContext";
 import { RegisterSW } from "./components/RegisterSW";
 import { InstallPrompt } from "./components/InstallPrompt";
 
@@ -48,14 +49,16 @@ export default function RootLayout({
     <html lang="en" className="dark" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-[var(--bg)] text-[var(--text)] transition-colors duration-200`}>
         <ThemeProvider>
-          <ComicsProvider>
-            <Navbar />
-            <main className="flex-1">{children}</main>
-            <Footer />
-            {/* PWA: SW registration + custom install banner (beforeinstallprompt) */}
-            <RegisterSW />
-            <InstallPrompt />
-          </ComicsProvider>
+          <UserProvider>
+            <ComicsProvider>
+              <Navbar />
+              <main className="flex-1">{children}</main>
+              <Footer />
+              {/* PWA: SW registration + custom install banner (beforeinstallprompt) */}
+              <RegisterSW />
+              <InstallPrompt />
+            </ComicsProvider>
+          </UserProvider>
         </ThemeProvider>
       </body>
     </html>

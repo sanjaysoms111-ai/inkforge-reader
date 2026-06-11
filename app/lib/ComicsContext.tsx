@@ -10,6 +10,9 @@ import React, {
 } from "react";
 import { Comic, Chapter, Genre, PublishComicInput, PublishChapterInput, Comment, Achievement } from "./types";
 import { MOCK_COMICS } from "./mockData";
+import { getSupabaseBrowserClient } from "./supabase/client";
+import { useUser } from "./UserContext";
+import { uploadComicMediaToStorage, prepareMediaForUpload } from "./supabase/storage";
 
 // Bridge format published by the inkforg_apexpanel Creator App
 // (extended to support real per-panel dialogues from newer Creator exports)
@@ -89,6 +92,17 @@ interface ComicsContextType {
   getUploadHistory: () => Array<{ slug: string; title: string; timestamp: string; coverUrl?: string }>;
   // Optional: record a completed upload into history (called from publish flow for user comics)
   recordUploadToHistory: (comic: Comic) => void;
+
+  // Hybrid public publish support
+  // Ingest a comic that was just uploaded to Storage + inserted to DB (with https panel URLs).
+  // Adds it to the in-memory list immediately (for UX) without persisting the (small) https data to private LS.
+  ingestPublicComic: (comic: Comic) => void;
+  // Force refetch/merge public comics from Supabase (call after login or manual refresh)
+  refreshPublicComics: () => void;
+
+  // Make an existing local (private) comic public: uploads its current data: media to Storage, inserts to DB as public, ingests https version into list.
+  // Preserves first-chapter-free.
+  makeComicPublic: (id: string) => Promise<void>;
 
   // Helpers
   getComicBySlug: (slug: string) => Comic | undefined;
@@ -253,6 +267,179 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
   const [uploadDrafts, setUploadDrafts] = useState<Record<string, { id?: string; timestamp: string; title?: string; data: any }>>({});
   const [uploadHistory, setUploadHistory] = useState<Array<{ slug: string; title: string; timestamp: string; coverUrl?: string }>>([]);
 
+  // Hybrid Supabase support (public comics)
+  const { user } = useUser();
+
+  // Normalize a row from Supabase (comics + joined chapters) to internal Comic shape (https panels)
+  function normalizeSupabaseComic(row: any): Comic {
+    const chs = (row.chapters || []).sort((a: any, b: any) => a.number - b.number);
+    const chapters: Chapter[] = chs.map((ch: any, idx: number) => ({
+      id: ch.id || `db-ch-${row.id}-${idx}`,
+      number: ch.number,
+      title: ch.title || `Chapter ${ch.number}`,
+      isPremium: !!ch.is_premium,
+      panels: Array.isArray(ch.panels) ? ch.panels : [],
+      coinPrice: typeof ch.coin_price === 'number' ? ch.coin_price : undefined,
+      thumbnail: ch.thumbnail_url,
+    }));
+
+    return {
+      id: row.id,
+      slug: row.slug,
+      title: row.title,
+      author: row.author,
+      coverUrl: row.cover_url || "",
+      genres: (row.genres || []) as Genre[],
+      description: row.description || "",
+      chapters,
+      views: row.views || 0,
+      publishedAt: row.published_at ? row.published_at.split("T")[0] : new Date().toISOString().split("T")[0],
+      isAIGenerated: true,
+      source: "user",
+      status: row.status || "ongoing",
+      tags: row.tags || [],
+      unlockAllPrice: row.unlock_all_price,
+      isPublic: row.is_public,
+    };
+  }
+
+  async function fetchAndMergePublicComics(userId: string) {
+    try {
+      const supabase = getSupabaseBrowserClient();
+      // Fetch public + my comics (RLS will limit appropriately)
+      const { data: rows, error } = await supabase
+        .from("comics")
+        .select("*, chapters (*)")
+        .or(`is_public.eq.true,owner_id.eq.${userId}`)
+        .order("published_at", { ascending: false });
+
+      if (error || !rows) return;
+
+      const fetched = rows.map(normalizeSupabaseComic);
+
+      setComics((prev) => {
+        const bySlug = new Map(prev.map((c) => [c.slug, c]));
+        fetched.forEach((fc) => {
+          // Prefer fetched (has https + isPublic) for public; keep local private as-is
+          if (!bySlug.has(fc.slug) || fc.isPublic) {
+            bySlug.set(fc.slug, fc);
+          }
+        });
+        return Array.from(bySlug.values());
+      });
+    } catch (e) {
+      // ignore (tables may not exist yet or offline)
+    }
+  }
+
+  const ingestPublicComic = useCallback((comic: Comic) => {
+    if (!comic) return;
+    setComics((prev) => {
+      const idx = prev.findIndex((c) => c.slug === comic.slug);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = { ...next[idx], ...comic, isPublic: true };
+        return next;
+      }
+      return [...prev, { ...comic, isPublic: true }];
+    });
+  }, []);
+
+  const refreshPublicComics = useCallback(() => {
+    if (user?.id) {
+      fetchAndMergePublicComics(user.id);
+    }
+  }, [user?.id]);
+
+  const makeComicPublic = useCallback(async (id: string) => {
+    if (!user?.id) {
+      throw new Error('Must be signed in to publish publicly');
+    }
+    const comic = comics.find((c) => c.id === id);
+    if (!comic) return;
+
+    // If already public with https, just ensure in list
+    if (comic.isPublic && !comic.coverUrl?.startsWith('data:')) {
+      ingestPublicComic(comic);
+      return;
+    }
+
+    // Upload current data: media (cover + panels) to Storage
+    const mediaFiles = prepareMediaForUpload(comic.coverUrl, comic.chapters);
+    let updatedComic: Comic = { ...comic, isPublic: true };
+
+    if (mediaFiles.length > 0) {
+      const urlMap = await uploadComicMediaToStorage(
+        user.id,
+        comic.slug,
+        mediaFiles
+      );
+
+      // Replace urls in a copy
+      const httpsCover = urlMap['cover'] || comic.coverUrl;
+      const httpsChapters = comic.chapters.map((ch) => ({
+        ...ch,
+        panels: ch.panels.map((_, pIdx) => {
+          const k = `ch${ch.number}-p${pIdx}`;
+          return urlMap[k] || ch.panels[pIdx];
+        }),
+      }));
+
+      updatedComic = {
+        ...comic,
+        coverUrl: httpsCover,
+        chapters: httpsChapters,
+        isPublic: true,
+      };
+    }
+
+    const finalComic = updatedComic;
+
+    // Insert / update in Supabase DB as public
+    const supabase = getSupabaseBrowserClient();
+    const { data: insComic, error: cErr } = await supabase
+      .from('comics')
+      .upsert({
+        owner_id: user.id,
+        slug: finalComic.slug,
+        title: finalComic.title,
+        author: finalComic.author,
+        description: finalComic.description,
+        cover_url: finalComic.coverUrl,
+        genres: finalComic.genres,
+        tags: finalComic.tags || [],
+        status: finalComic.status || 'ongoing',
+        is_public: true,
+        unlock_all_price: finalComic.unlockAllPrice,
+        source: 'user',
+        views: finalComic.views || 0,
+      }, { onConflict: 'slug' })
+      .select()
+      .single();
+
+    if (cErr || !insComic) {
+      console.error('DB upsert comic for public failed', cErr);
+      // still ingest local https version
+      ingestPublicComic(finalComic);
+      return;
+    }
+
+    // chapters
+    const chRows = finalComic.chapters.map((ch, idx) => ({
+      comic_id: insComic.id,
+      number: ch.number || (idx + 1),
+      title: ch.title,
+      is_premium: ch.isPremium,
+      coin_price: ch.coinPrice ?? 10,
+      panels: ch.panels,
+    }));
+    await supabase.from('chapters').upsert(chRows, { onConflict: 'comic_id,number' });
+
+    // Ingest the https version immediately
+    ingestPublicComic({ ...finalComic, id: insComic.id, isPublic: true });
+
+  }, [user?.id, comics, ingestPublicComic]);
+
   // Load persisted data (user published + creator bridge)
   useEffect(() => {
     let merged = [...MOCK_COMICS];
@@ -371,37 +558,19 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       }
     } catch {}
 
-    // First-run boost to give a taste of premium reader (preserves first-chapter-free + premium flow experience).
-    if (!hadSavedUnlocks && merged.length > 0) {
-      const first = merged.find((c) => !c.id.startsWith("pub-"));
-      if (first) {
-        const firstPremium = first.chapters.find((ch) => ch.isPremium);
-        if (firstPremium) {
-          setUnlocked((prev) => ({ ...prev, [`${first.id}:${firstPremium.id}`]: true }));
-        }
-        const freeCh = first.chapters.find((ch) => !ch.isPremium);
-        if (freeCh) {
-          const key = `${first.slug}:${freeCh.number}`;
-          setComments((prev) => {
-            if (prev[key] && prev[key].length > 0) return prev;
-            return {
-              ...prev,
-              [key]: [
-                {
-                  id: "seed_comment_1",
-                  author: "Alex Reader",
-                  text: "The art in this chapter is stunning. Can't wait to see where the story goes!",
-                  timestamp: new Date(Date.now() - 1000 * 60 * 38).toISOString(),
-                  likes: 3,
-                  reactions: { "🔥": 2, "👏": 1 },
-                },
-              ],
-            };
-          });
-        }
-      }
-    }
+    // NOTE (hybrid + Supabase): Old first-run unlock seeding / hadSavedUnlocks / setUnlocked removed.
+    // Unlocks now live exclusively in UserContext (local fallback + future Supabase table).
+    // This useEffect only merges *local* comics (published LS + creator bridge).
+    // Future: on auth, query public comics from Supabase and merge (dedup by slug).
   }, []);
+
+  // Hybrid: fetch/merge public + owned Supabase comics when user is present
+  // (local private + creator bridge stay in the initial load above)
+  useEffect(() => {
+    if (user?.id) {
+      fetchAndMergePublicComics(user.id);
+    }
+  }, [user?.id]);
 
   // Persist comments
   useEffect(() => {
@@ -1161,10 +1330,7 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem(CACHED_KEY);
       localStorage.removeItem(UPLOAD_DRAFTS_KEY);
       localStorage.removeItem(UPLOAD_HISTORY_KEY);
-      localStorage.removeItem(SUBSCRIPTION_KEY);
-      localStorage.removeItem(TRANSACTIONS_KEY);
-      localStorage.removeItem(EVENTS_KEY);
-      // Clear progress keys
+      // Clear progress keys (old premium keys SUBSCRIPTION/TRANSACTIONS/EVENTS removed)
       Object.keys(localStorage).forEach((k) => {
         if (k.startsWith(PROGRESS_KEY_PREFIX)) localStorage.removeItem(k);
       });
@@ -1434,6 +1600,9 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
     isChapterCached,
     cacheChapterForOffline,
     resetToDemo,
+    ingestPublicComic,
+    refreshPublicComics,
+    makeComicPublic,
   };
 
   return <ComicsContext.Provider value={value}>{children}</ComicsContext.Provider>;

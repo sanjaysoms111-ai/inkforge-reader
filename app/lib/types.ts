@@ -42,6 +42,7 @@ export interface Comic {
   status?: 'ongoing' | 'completed';
   tags?: string[];
   unlockAllPrice?: number; // custom price to unlock all premium chapters in this comic; defaults to 60
+  isPublic?: boolean; // true for comics stored in Supabase (public discovery for logged-in users)
 }
 
 export interface UserCoinState {
@@ -66,6 +67,7 @@ export interface PublishComicInput {
   status?: 'ongoing' | 'completed';
   tags?: string[];
   unlockAllPrice?: number; // custom price to unlock all premium chapters
+  isPublic?: boolean; // when true: upload to Supabase Storage + insert to DB with is_public=true (shared)
 }
 
 export interface Comment {

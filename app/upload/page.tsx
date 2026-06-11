@@ -8,7 +8,7 @@ import {
   Upload, Plus, Trash2, ArrowUp, ArrowDown, Image as ImageIcon, Check, X, ArrowLeft
 } from 'lucide-react';
 import { useComics } from '../lib/ComicsContext';
-import { Genre, PublishComicInput } from '../lib/types';
+import { Genre, PublishComicInput, Comic } from '../lib/types';
 import { SmartImage } from '../components/SmartImage';
 import {
   MAX_PANELS_PER_CHAPTER,
@@ -16,6 +16,9 @@ import {
   processImageFiles,
   generateThumbnail,
 } from '../lib/uploadUtils';
+import { useUser } from '../lib/UserContext';
+import { uploadComicMediaToStorage, prepareMediaForUpload } from '../lib/supabase/storage';
+import { getSupabaseBrowserClient } from '../lib/supabase/client';
 
 const ALL_GENRES: Genre[] = [
   "Fantasy", "Romance", "Action", "Mystery", "Sci-Fi",
@@ -41,7 +44,10 @@ export default function UploadComicPage() {
     getUploadHistory,
     recordUploadToHistory,
     updateUploadedComic,
+    ingestPublicComic,
   } = useComics();
+
+  const { user } = useUser();
 
   // Comic metadata
   const [title, setTitle] = useState('');
@@ -76,6 +82,9 @@ export default function UploadComicPage() {
 
   // Robust upload preview reader (highest priority per design)
   const [showReaderPreview, setShowReaderPreview] = useState(false);
+
+  // Public / Private (new for Supabase shared library)
+  const [isPublic, setIsPublic] = useState(false);
 
   // Keyboard + a11y helpers
   const [announce, setAnnounce] = useState(''); // for aria-live polite announcements
@@ -351,10 +360,10 @@ export default function UploadComicPage() {
       setError('Please provide a title, cover, and at least one panel in every chapter.');
       return;
     }
-    if (processingProgress) return; // still processing images
+    if (processingProgress) return;
 
     try {
-      // Attach advanced fields (gallery, banner) + ensure any missing thumbnails (first panel)
+      // Prepare base input (first chapter always free - invariant)
       const chaptersForInput = await Promise.all(chapters.map(async (ch, idx) => {
         let thumb = ch.thumbnail;
         if (!thumb && ch.panels.length > 0) {
@@ -365,11 +374,10 @@ export default function UploadComicPage() {
           isPremium: idx === 0 ? false : ch.isPremium,
           panels: ch.panels,
           coinPrice: idx === 0 ? undefined : ch.coinPrice,
-          // thumbnail will be carried on the final Comic via context publish path
         };
       }));
 
-      const input: PublishComicInput = {
+      const baseInput: PublishComicInput = {
         title: title.trim(),
         author: author.trim() || 'You',
         description: description.trim(),
@@ -378,14 +386,145 @@ export default function UploadComicPage() {
         status,
         tags,
         unlockAllPrice: unlockAllPrice && unlockAllPrice > 0 ? unlockAllPrice : undefined,
-        chapters: chaptersForInput as any, // thumbnails attached post-publish in context if needed
+        chapters: chaptersForInput as any,
+        isPublic,
       };
 
-      const created = publishComic(input);
+      if (isPublic && user) {
+        // PUBLIC PATH: upload to Supabase Storage then DB (shared discovery)
+        setProcessingProgress({ current: 0, total: 0, label: 'Preparing upload...' });
 
-      // Attach gallery/banner + thumbnails to the created comic via update (advanced fields)
+        // 1. Prepare list of media (cover + all panels) + do Storage upload with progress
+        const mediaFiles = prepareMediaForUpload(coverUrl, chapters.map((ch, i) => ({ number: i + 1, panels: ch.panels })));
+        const totalFiles = mediaFiles.length;
+
+        const urlMap = await uploadComicMediaToStorage(
+          user.id,
+          // simple slug from title for folder (context will ensure unique on ingest if needed)
+          (title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "comic") + "-" + Date.now().toString(36),
+          mediaFiles,
+          (uploaded, total, key) => {
+            setProcessingProgress({
+              current: uploaded,
+              total,
+              label: `Uploading to cloud${key ? ` (${key})` : ""}...`,
+            });
+          }
+        );
+
+        // 2. Build final input with https URLs (replace data: with the uploaded ones)
+        const publicCover = urlMap["cover"] || coverUrl;
+        const publicChapters = chaptersForInput.map((chIn, cIdx) => {
+          const chDraft = chapters[cIdx];
+          const publicPanels = chDraft.panels.map((_, pIdx) => {
+            const k = `ch${cIdx + 1}-p${pIdx}`;
+            return urlMap[k] || chDraft.panels[pIdx];
+          });
+          return { ...chIn, panels: publicPanels };
+        });
+
+        const publicInput: PublishComicInput = {
+          ...baseInput,
+          coverUrl: publicCover,
+          chapters: publicChapters,
+        };
+
+        // 3. Insert to Supabase DB (comics then chapters). Use browser client + RLS (owner_id enforced by policy)
+        const supabase = getSupabaseBrowserClient();
+        const slugBase = publicInput.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+        let slug = `${slugBase}-${Date.now().toString(36)}`;
+        // best-effort unique (DB has constraint; fallback suffix if needed)
+        let suffix = 1;
+        // (simple client-side check omitted for brevity; server will error on dup)
+
+        const { data: insertedComic, error: comicErr } = await supabase
+          .from("comics")
+          .insert({
+            owner_id: user.id,
+            slug,
+            title: publicInput.title,
+            author: publicInput.author,
+            description: publicInput.description,
+            cover_url: publicInput.coverUrl,
+            genres: publicInput.genres,
+            tags: publicInput.tags || [],
+            status: publicInput.status,
+            is_public: true,
+            unlock_all_price: publicInput.unlockAllPrice,
+            source: "user",
+          })
+          .select()
+          .single();
+
+        if (comicErr || !insertedComic) throw new Error(comicErr?.message || "Failed to insert comic to DB");
+
+        // Insert chapters (use the returned comic id)
+        const chapterRows = publicInput.chapters.map((ch, idx) => ({
+          comic_id: insertedComic.id,
+          number: idx + 1,
+          title: ch.title,
+          is_premium: ch.isPremium,
+          coin_price: ch.coinPrice ?? 10,
+          panels: ch.panels, // the https urls
+        }));
+
+        const { error: chErr } = await supabase.from("chapters").insert(chapterRows);
+        if (chErr) {
+          // best effort cleanup of orphan comic row (optional)
+          await supabase.from("comics").delete().eq("id", insertedComic.id);
+          throw new Error(chErr.message);
+        }
+
+        // 4. Build normalized comic for immediate ingest (https panels)
+        const normalizedPublic: Comic = {
+          id: insertedComic.id,
+          slug: insertedComic.slug,
+          title: insertedComic.title,
+          author: insertedComic.author,
+          coverUrl: insertedComic.cover_url,
+          genres: (insertedComic.genres || []) as Genre[],
+          description: insertedComic.description || "",
+          chapters: publicInput.chapters.map((ch, i) => ({
+            id: `pub-ch-${i}-${Date.now()}`,
+            number: i + 1,
+            title: ch.title,
+            isPremium: ch.isPremium,
+            panels: ch.panels,
+            coinPrice: ch.coinPrice,
+          })),
+          views: 0,
+          publishedAt: new Date().toISOString().split("T")[0],
+          isAIGenerated: true,
+          source: "user",
+          status: publicInput.status,
+          tags: publicInput.tags,
+          unlockAllPrice: publicInput.unlockAllPrice,
+          isPublic: true,
+        };
+
+        // Ingest immediately (context will merge; future reloads will refetch from DB)
+        ingestPublicComic(normalizedPublic);
+
+        // Also record history (light metadata) + clear draft
+        recordUploadToHistory(normalizedPublic as any);
+        deleteUploadDraft(DRAFT_KEY);
+
+        setProcessingProgress(null);
+        // Success toast
+        const toast = document.createElement("div");
+        toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
+        toast.textContent = "Public comic published successfully!";
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 2200);
+        router.push("/");
+        return;
+      }
+
+      // PRIVATE / LOCAL PATH (existing behavior - data: URLs + localStorage)
+      const created = publishComic(baseInput);
+
+      // Attach gallery/banner + thumbnails (advanced)
       if (coverGallery.length > 0 || bannerUrl) {
-        // generate any missing chapter thumbs on the real comic
         const finalChapters = await Promise.all(created.chapters.map(async (ch) => {
           if (ch.thumbnail || ch.panels.length === 0) return ch;
           try {
@@ -399,16 +538,13 @@ export default function UploadComicPage() {
         } as any);
       }
 
-      // Record to upload history + clear active draft
       recordUploadToHistory(created);
       deleteUploadDraft(DRAFT_KEY);
 
-      // Per UX improvement request: after upload automatically surface the new comic
-      // (source:'user' + emerald-style badge) in the homepage lists (newest-first grid etc.).
-      // User lands directly on discovery so the new card is immediately visible with its badge.
-      router.push('/');
+      router.push("/");
     } catch (e: any) {
-      setError(e.message || 'Failed to publish comic. Check console for details.');
+      setError(e.message || "Failed to publish comic. Check console for details.");
+      setProcessingProgress(null);
     }
   };
 
@@ -499,10 +635,13 @@ export default function UploadComicPage() {
           </button>
         </div>
 
-        {/* Warning about storage */}
+        {/* Warning about storage (contextual on visibility) */}
         <div className="mb-6 rounded-xl border border-amber-900/40 bg-amber-950/20 px-4 py-3 text-xs text-amber-300">
-          <strong>Important:</strong> All images are converted to inline <code>data:</code> URLs and saved in localStorage.
-          Use reasonably sized images (ideally &lt;300–500 KB each) to avoid hitting browser storage limits.
+          <strong>Important:</strong> {isPublic ? (
+            <>When Public: cover + panels are uploaded to Supabase Storage (cloud) and the comic becomes discoverable to all logged-in users. Private keeps everything local (data: URLs + localStorage).</>
+          ) : (
+            <>Images are converted to inline <code>data:</code> URLs and saved in localStorage. Use reasonably sized images (ideally &lt;300–500 KB each).</>
+          )}
           First chapter is <strong>always free</strong> for readers.
         </div>
 
@@ -574,6 +713,24 @@ export default function UploadComicPage() {
             <div className="mt-1 text-[10px] text-[var(--text-muted)]">Drafts auto-save on changes. History of published uploads available via context too.</div>
           </div>
         )}
+
+        {/* Visibility toggle (Public = Supabase Storage + DB + shared discovery; Private = local data: + LS) */}
+        <div className="mb-6 p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-card)]/60">
+          <div className="text-sm font-medium mb-2">Visibility</div>
+          <div className="flex gap-3 text-sm">
+            <label className={`flex-1 cursor-pointer rounded-lg border p-3 ${!isPublic ? 'border-[var(--accent)] bg-[var(--accent)]/5' : 'border-[var(--border)] hover:bg-[var(--bg-elev)]'}`}>
+              <input type="radio" name="vis" checked={!isPublic} onChange={() => setIsPublic(false)} className="mr-2" />
+              <span className="font-medium">Private</span>
+              <div className="text-[10px] text-[var(--text-muted)] mt-0.5">Local only (data: URLs). Only you see it. Works fully offline.</div>
+            </label>
+            <label className={`flex-1 cursor-pointer rounded-lg border p-3 ${isPublic ? 'border-emerald-500 bg-emerald-500/5' : 'border-[var(--border)] hover:bg-[var(--bg-elev)]'}`}>
+              <input type="radio" name="vis" checked={isPublic} onChange={() => setIsPublic(true)} className="mr-2" disabled={!user} />
+              <span className="font-medium">Public</span>
+              <div className="text-[10px] text-[var(--text-muted)] mt-0.5">Upload to Supabase Storage + DB. Visible to all logged-in users. Requires sign-in. First chapter remains free.</div>
+            </label>
+          </div>
+          {isPublic && !user && <div className="mt-2 text-xs text-red-400">Sign in to publish publicly.</div>}
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* FORM COLUMN */}
@@ -1120,6 +1277,9 @@ export default function UploadComicPage() {
               </button>
               <div className="text-center mt-2 text-[10px] text-[var(--text-muted)]">
                 This will save the comic locally using the same storage as Creator imports.
+              </div>
+              <div className="mt-2 text-center text-[10px] text-amber-400/80 px-2">
+                By uploading, you confirm all content is original and does not infringe any copyrights. Violations may lead to content removal and account suspension.
               </div>
             </div>
 

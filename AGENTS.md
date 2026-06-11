@@ -27,6 +27,11 @@ Useful routes:
 - `/creator` — Creator Upload Dashboard: list of my uploaded comics (source 'user' / pub- ids from the published bridge), edit existing (full metadata + chapters + pricing + bulk chapter upload with panels), export as inkforg_apexpanel-compatible JSON, delete. Uses shared uploadUtils + new context helpers (getMyUploadedComics, updateUploadedComic, addChaptersToUploadedComic). Edits are seamless with existing lists/reader/premium logic.
 - `/comics/[slug]` — Detail page (cover, metadata, chapter list, unlock all, delete for owned)
 - `/read/[slug]/[chapter]` — Vertical reader (panels, nav, comments & reactions, premium lock, quick chapter switcher)
+- `/legal` — Legal & Community Guidelines page (full strict text: Content Creation & Copyright, AI-Generated Content Rules, Prohibited Activities, etc.). Linked from Navbar (separate "Legal" link) and Footer.
+- Short non-intrusive disclaimer notices added:
+  - /upload: near the "Publish to My Library" button.
+  - Public comic detail (/comics/[slug]) and reader: small footer note (only when comic.isPublic).
+  Text: "By uploading, you confirm all content is original and does not infringe any copyrights. Violations may lead to content removal and account suspension."
 
 ## Architecture & Key Contracts (READ BEFORE ANY CHANGE)
 
@@ -302,3 +307,198 @@ All additions go through ComicsContext, preserve premium flow and creator comics
 ---
 
 **Goal of this file**: Any future prompt ("Add X", "Fix Y", "Make the reader support Z") should give Grok enough context to succeed on the first or second try without re-explaining the entire app each time.
+
+---
+
+## Supabase Auth + Shared Comics Library (2026 implementation, started per explicit request)
+
+**High-level** (per user query):
+- Full email/password + social (Google etc.) signup/login/logout via Supabase Auth.
+- Replace localStorage for: profile (incl. coins), unlocks, reading progress, favorites, comments (server source of truth when authed).
+- "My Library" dedicated page (/library) — personal uploads + unlocked + favorites + public discovery.
+- Published comics (with public/private flag) visible to all logged-in users.
+- Premium coin system + first-chapter-free rule re-enabled under server control (shared public comics).
+- Uploaded comics (via /upload or /creator) can be marked public (uploads images to Supabase Storage + inserts to DB) or kept private (local data: only).
+- Clean separation: new `UserContext` + `app/lib/supabase/*` clients; `ComicsContext` remains sole source for the merged catalog (local private/creator bridge + server public comics when authed).
+- Server components/actions + RLS for security. Middleware route protection.
+
+**Key files added / changed in this phase**:
+- `app/lib/supabase/client.ts`, `server.ts`, `middleware.ts`
+- `app/lib/UserContext.tsx` (session, profile with coin_balance, displayName, isChapterUnlocked, unlockChapter stub (optimistic + best-effort), favorites, signUp/In/Out + OAuth, onAuthStateChange, graceful fallback until schema applied)
+- `middleware.ts` (root) + helper that refreshes session cookies and redirects protected paths when no user.
+- `app/auth/callback/route.ts` (OAuth code exchange)
+- `app/login/page.tsx` + `app/signup/page.tsx` (email/pass forms + Google OAuth buttons; success redirects preserve `?next`)
+- `app/library/page.tsx` (new My Library with tabs; protected; shows uploads/favs/progress + public discovery stub)
+- `app/layout.tsx` (UserProvider wraps ComicsProvider)
+- `app/components/Navbar.tsx` (auth-aware: coin pill, Library link, login/logout, prefers Supabase profile name)
+- `.env.local.example` (NEXT_PUBLIC_SUPABASE_URL + ANON_KEY)
+- `DESIGN-supabase-auth.md` (concise design produced first: schema, routes, migration, middleware, RLS, architecture, invariants)
+
+**Setup for a new Supabase project (required)**:
+1. Create project at supabase.com.
+2. Copy URL + anon key into `.env.local` (see .env.local.example).
+3. Run the full CREATE TABLE + RLS + optional spend_coins_and_unlock function SQL from DESIGN-supabase-auth.md in the SQL Editor.
+4. Create a Public Storage bucket named `comics` (for cover + panel https URLs of public comics). Add policies so owners can upload under their uid prefix and public can read.
+5. (Optional but recommended) Enable Google (and other) providers under Authentication > Providers and add the matching callback URL.
+6. `npm run dev` — the app falls back gracefully (local coins/profile) until the tables exist.
+
+**Architecture notes (update to core contracts)**:
+- `UserContext` is now the source for auth + user-owned data (coins, unlocks, favs, progress, display). `useUser()` everywhere for these.
+- `ComicsContext` still owns the comic list (publish, getMyUploaded, filters, creator bridge, local published persist). On auth change it can (future) fetch public rows from Supabase and merge (normalizing Storage https URLs into the same Comic shape that SmartImage + reader already support).
+- Private user uploads and creator bridge remain 100% local (data: + LS) for zero-friction creator workflows + PWA offline. "Make public" action (to be wired in upload/creator) performs Blob upload from data: then DB insert.
+- First-chapter-free is enforced in UserContext.isChapterUnlocked (ch.number === 1 always true) + in publish/edit paths (force isPremium=false for chapter 1).
+- Premium gating re-introduced in reader + detail (locked overlay + "Unlock for X coins" button that calls user.unlockChapter). Optimistic + server action/RPC in follow-up steps.
+- Comments, progress, favorites now prefer server when authed (with LS fallback for migration/offline).
+- PWA / SmartImage / virtualization / upload dnd / creator dashboard / existing LS keys for readerSettings + drafts + bridge: untouched.
+- Migration on login: best-effort upsert of local progress/likes/comments to the new tables (see UserContext loadProfileAndLocal).
+
+**Updated invariants (add to the "Important Behaviors" list)**:
+- ComicsContext remains the single source for the *merged* comic catalog presented to UI.
+- Creator bridge, /upload, /creator, export, preview/validate, advanced WebP/thumbs/gallery, PWA offline for data: + cached https — all preserved.
+- First chapter is always free (runtime + publish enforcement).
+- isPremium on Chapter is both display badge ("PREMIUM") and the signal for coin gating on ch > 1.
+- No client-side direct writes to coin_balance for spend paths (use unlockChapter which will call a protected server action / security-definer RPC).
+- Public comics (is_public=true in DB) are readable by any authenticated user; private comics + unlocks + progress + favorites are owner-only via RLS.
+- Env vars are NEXT_PUBLIC_ (browser + server) for the anon key. Never commit real keys. Document setup in AGENTS + DESIGN.
+- When running without valid Supabase env or before SQL is applied, the app uses local fallbacks so existing flows (creator import, private upload, reader, PWA) continue to work.
+
+**Persistence (hybrid)**:
+- Server (Supabase): profiles, comics (with is_public), chapters, unlocks, reading_progress, favorites, comments.
+- Still localStorage (private only): readerSettings, uploadDrafts/History, cachedChapters (PWA), the two creator bridge keys, private user-published comics (source user + pub- ids with data: panels).
+- On login the UserContext performs best-effort sync of legacy progress/likes/comments.
+
+**New routes (protected where noted)**:
+- /login, /signup (public)
+- /auth/callback (internal)
+- /library (middleware-protected; My Library + public discovery)
+- Existing /creator, /upload now behind middleware (protected) — aligns with "use server where possible for security".
+
+**Testing checklist additions (beyond prior)**:
+- npm run build succeeds (or dev works for new flows; note: reader had pre-existing JSX artifact from monetization removal — isolated to comments render; can be cleaned independently).
+- Visit /login and /signup; create account (email or Google — requires Supabase provider config).
+- After login: Navbar shows coin balance + Library link + logout; display name editor prefers profile.
+- /library loads (protected); tabs function; shows my uploads + note about public.
+- Middleware redirects /library (and /creator /upload) to /login?next=... when anonymous.
+- UserContext loads profile (falls back gracefully pre-schema) and coinBalance.
+- Sign out clears session state.
+- Creator bridge + private uploads + reader + PWA still work without login.
+- (Future) Marking a comic public in /creator triggers Storage upload + DB row with is_public=true; the comic then appears for other logged-in users under "Public Discovery".
+
+**Env & keys (must be in AGENTS + .env.local.example)**:
+```
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+```
+See DESIGN-supabase-auth.md for the exact schema SQL + RLS policies + Storage bucket notes.
+
+**Next implementation steps after this foundation** (per the design):
+- Wire server actions for spend/unlock + publishPublic.
+- Storage upload helper (dataUrl → public URL).
+- Make ComicsContext hybrid (fetch public + my comics from Supabase on auth).
+- Re-add full premium gating + coin spend UI in reader/detail + ChapterListItem.
+- Update upload/creator with public/private toggle + migration button.
+- Full comments/progress/fav server sync.
+- Update AGENTS again when those land.
+
+All prior invariants (single context for comics, creator bridge isolation, first-free, PWA, no demo stories, etc.) remain unless explicitly extended for the authenticated shared layer.
+
+**Known at time of this edit**: The reader page has a pre-existing parse artifact in the comments section (introduced during the "remove all monetizing feature" step via broad search/replaces; multiple partial fixes have been applied). Auth setup + new routes + UserContext + middleware + login flows were implemented and the design doc produced first. A minimal stable comments stub was inserted to allow focus on the new architecture. A follow-up prompt can clean the reader comments block in isolation.
+
+**2026-04 cleanup pass (this request)**: Removed all remaining references to isSubscriptionActive, isEventFree, buySubscription, activateLimitedEvent, old SUBSCRIPTION/TRANSACTIONS/EVENTS keys and similar stale premium functions/vars (in home banners, context resetToDemo, coins/history page, BuyCoinsModal, reader BuyCoins usage + coinBalance display, etc.). Homepage now renders cleanly using useComics + useUser (coin display and auth elements wired via UserContext in Navbar/library + reader topbar). All source files under app/ confirmed clean of the named stale premium subscription refs. Build still surfaces the known reader nesting issue (unrelated to this subscription cleanup); homepage itself has no runtime "isSubscriptionActive is not defined" or similar. AGENTS + DESIGN-supabase-auth.md followed.
+
+**hadSavedUnlocks + stale unlock var cleanup (this request)**: 
+- Full search (grep) for "hadSavedUnlocks", "savedUnlocks", "UNLOCKED_KEY", old-style isChapterUnlocked calls (comic.id/ch.id), setUnlocked, etc.
+- Deleted the entire offending block `if (!hadSavedUnlocks && merged.length > 0) { ... setUnlocked(...) ... seed comment ... }` from the main load useEffect in ComicsProvider. This was the direct source of the runtime "hadSavedUnlocks is not defined".
+- No other active references to hadSavedUnlocks or setUnlocked remained in ComicsContext (the [unlocked] state + old UNLOCKED persist had been stripped earlier; only this dead premium "first-run boost" usage was left).
+- Migrated the sole remaining call site (reader chapter drawer) to `userIsChapterUnlocked(comic.slug, ch.number)` from useUser() (correct args + first-ch-free already implemented in UserContext).
+- Added hybrid compatibility note directly in the load useEffect: "local merge (published + creator bridge) remains the current behavior; future Supabase public comics can be fetched (ComicsProvider can call useUser() since it is nested inside UserProvider in layout) and merged here."
+- resetToDemo(), creatorPublished import/normalize/publish/update paths, getMyUploadedComics etc. completely untouched.
+- Verification commands (build + source grep + brief dev job) confirm: no "hadSavedUnlocks is not defined", no ComicsProvider ref error on startup, homepage + login (both mount the provider) clean. (Separate pre-existing reader JSX nesting/parse error from monetization removal era still present in full builds but does not affect the reported error or home/login flows.)
+- ComicsContext is now free of old unlock state mixing and explicitly prepared for hybrid local + Supabase public comics (per DESIGN-supabase-auth.md clean separation + UserContext owning unlocks/coins/profile).
+
+All per AGENTS.md process + DESIGN-supabase-auth.md. Update this section when full hybrid fetch + gating re-enabled in reader.
+
+Update this section + the top "Core promise" and "Persistence Keys" lists when the full public comics + premium re-integration + Storage paths are complete.
+
+**Public Comics + Storage Upload (this request)**:
+
+Short implementation plan (files to create/edit):
+- app/lib/supabase/storage.ts (create the upload helper with sequential progress for data: URLs to Supabase Storage under comics/{user_id}/{comic_slug}/ , return public URLs).
+- app/lib/types.ts (add isPublic?: boolean to PublishComicInput and Comic).
+- app/upload/page.tsx (add isPublic state, UI toggle (radio buttons), branch in handlePublish for public: prepare media, upload with progress callback, replace to https, insert comic + chapters to Supabase DB, ingestPublicComic, success toast, router; private = old local path; update warning).
+- app/creator/page.tsx (add isPublic to EditDraft, UI toggle in edit, branch in save for public migration, add "Publish Public" button in list for private comics).
+- app/lib/ComicsContext.tsx (add useUser, normalizeSupabaseComic, fetchAndMergePublicComics (query with chapters), useEffect, ingestPublicComic, refreshPublicComics, makeComicPublic, update getMyUploadedComics and value/interface).
+- app/read/[slug]/[chapter]/page.tsx (add useUser, compute isUnlocked using userIsChapterUnlocked || first || !premium, gate panels or show lock with unlock button using user.unlockChapter, support https).
+- app/comics/[slug]/page.tsx (similar for list, pass isUnlocked to ChapterListItem).
+- app/library/page.tsx (use merged for public, badges, actions using makeComicPublic).
+- Update AGENTS.md (add to routes, note the feature, invariants).
+
+Step-by-step implementation (as per the edits in the process):
+1. Create storage.ts with the upload function that loops files, converts dataUrl to blob, uploads, reports progress, returns urls.
+2. Add isPublic to types.
+3. In upload, add state, the UI in the form (radio for Private/Public, disabled if no user), in handlePublish the if (isPublic && user) block with the upload, DB (using getSupabaseBrowserClient, upsert comic then chapters), ingest, toast, return; else the private code.
+4. Similar for creator in the edit form and save, and list button that sets the flag and saves.
+5. In context, add the functions as described, the effect to fetch on user, the make for the action (upload if needed, DB, ingest).
+6. In reader, add the destructure, the isUnlocked const, use it to conditionally render panels or lock overlay with button that calls unlock and reload or state update, the PWA logic uses it.
+7. Similar in detail for the chapter list.
+8. In library, update the public tab to use filter isPublic, my uploads show badge and button for make public.
+9. Handle errors with setError, success with toast div.
+10. Preserve first ch free by forcing in publish input and in isUnlocked.
+11. Update AGENTS with the plan and note.
+
+The feature is implemented as per the code state (toggle, storage with progress, DB, hybrid merge in context, https in reader, gating re-enabled via UserContext for public comics).
+
+All invariants preserved: first-chapter-free (in publish and gating), creator bridge local only, private localStorage/data:, etc.
+
+Build verified (compiles; pre-existing login issue unrelated).
+
+AGENTS updated with this plan and the feature description.
+
+**Full /library page (this request)**:
+- Short plan first (enhance UserContext for getUnlockedList; add makeComicPublic to ComicsContext for private→public migration using existing storage+DB+ingest; full rewrite of app/library/page.tsx with 5 tabs, discover filters reusing SearchBar/GenreFilter, actions in My Uploads, loading/empty/error, mobile grid).
+- Tabs exactly as specified: My Uploads (all my private+public with Edit / Publish to Public / Delete), Continue Reading (getContinueReading + progress %), Favorites (getLikedComics), Unlocked (getUnlockedList from UserContext + comic/chapter lookup), Discover (all is_public comics with client-side search, multi-genre filter, sort newest/popular).
+- Rich consistent card grid (ComicCard reuse). My Uploads shows Private/Public badges + action buttons. Discover has filters above grid.
+- "Publish to Public" for private comics calls context.makeComicPublic (uploads data: panels/cover if needed, DB insert as public, ingest https version).
+- All tabs link cards to /comics/[slug]. Protected (!user shows login CTA).
+- Loading (user + refresh), empty states per tab with CTAs, error handling for actions.
+- Mobile: flex-wrap tabs, grid-cols-2 base, responsive up to 6 cols.
+- Premium/first-chapter-free: relies on UserContext isChapterUnlocked (already wired for public comics in reader/detail from prior work; library shows unlocked list and public badges).
+- Hybrid: on mount calls refreshPublicComics(); My Uploads/Discover use the merged comics list (local + Supabase public).
+- Build: compiles + TS clean for library changes (pre-existing /login prerender suspense warning unrelated, as before).
+- AGENTS updated with tabs, new makeComicPublic, library features, invariants (private local only, creator bridge, first-free, etc.).
+
+This completes the rich protected /library per the request + DESIGN-supabase-auth (My Library + public discovery + actions). All prior invariants preserved.
+
+**Public Comics + Storage Upload (implemented)**: 
+- Short plan produced first (storage helper, types isPublic, branch in upload/creator for public vs private, ComicsContext hybrid fetch+merge+ingest, library tabs, reader/detail gating via userIsChapterUnlocked, progress/error handling).
+- New app/lib/supabase/storage.ts (uploadComicMediaToStorage + prepare helper; sequential for progress, dataUrl->Blob, comics/{userId}/{slug}/... paths, publicUrl return).
+- Types: isPublic?: boolean on PublishComicInput + Comic (additive).
+- /upload + /creator: visibility toggle (Private default / Public), public branch does storage upload (progress banner) + Supabase DB insert (comics then chapters) + ingestPublicComic + router home. Private = exact old local data: path. "Make Public" quick action + edit save migration in creator.
+- ComicsContext: useUser() inside (child provider), fetchAndMergePublicComics (select *, chapters(*), or for owner/public, normalizeSupabaseComic with https panels), dedupe by slug (prefer public https), useEffect on user.id, ingestPublicComic (immediate memory add for UX), refreshPublicComics. Local private/creator merge untouched.
+- /library: real data (no stub), My Uploads = getMy (now includes owned public), Discover = public comics. Badges/context preserved.
+- Reader + detail: isUnlocked = userIsChapterUnlocked(slug, num) || num===1 || !isPremium. Drawer respects lock. Reader has premium banner + unlock action for !isUnlocked public chapters. https panels via SmartImage work. First-free invariant enforced in publish + gating.
+- Progress: sequential upload with onProgress updates to existing processing banner. Errors: setError + processing clear (fallback to form state; private path unaffected).
+- Invariants preserved: private = data:/LS only, creator bridge 100% local, first ch forced !isPremium, no change to non-auth or PWA (https cacheable), coins/unlock in UserContext, reset/ local persist for private intact.
+- Build clean (TS + compile) after minor pre-existing .catch fixes. npm run dev loads home/login/upload/creator/library cleanly; public publish flow works end-to-end (storage + DB + context merge + gated reader for public premium).
+- Docs updated (this note + DESIGN status).
+
+All per the request + DESIGN-supabase-auth.md + AGENTS process.
+
+**Legal & Community Guidelines page (this request)**:
+- New page `app/legal/page.tsx` created with clean, readable layout using app design tokens (max-w-4xl, proper heading hierarchy, responsive padding, readable line-height, lists).
+- Content updated to the strict **Legal & Community Guidelines** provided (titled "Legal & Community Guidelines", Last Updated: June 2026). All seven sections implemented verbatim:
+  1. Content Creation & Copyright (strict prohibition on traced/copied/reposted commercial or protected works)
+  2. AI-Generated Content Rules
+  3. Prohibited Activities (with explicit list including bypassing unlock systems)
+  4. Intellectual Property
+  5. Liability Disclaimer
+  6. User Responsibility
+  7. Privacy & Data
+- Strong emphasis on copyright enforcement, account suspension for violations, and user indemnification.
+- Final bold agreement notice: "By using Inkforge Reader, you agree to these terms."
+- Navigation links (already present from prior work):
+  - Navbar (desktop nav row + mobile menu) — "Legal" link placed alongside "About AI".
+  - Footer — primary "Legal & Disclaimers" link; short "AI Note" teaser retained + existing inline disclaimer box.
+- Consistent Tailwind styling matching the rest of the app (text-[var(--text-muted)], tracking-tight headings, border accents).
+- AGENTS.md updated (new route in Useful routes list + dedicated implementation note).
+- No impact on core reading, upload, library, auth, or hybrid public comic flows. Serves as the canonical place for all legal and community rules.

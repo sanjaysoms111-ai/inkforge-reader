@@ -12,7 +12,7 @@ import { motion } from "framer-motion";
 import { BookOpen, Upload } from "lucide-react";
 
 export default function HomePage() {
-  const { trending, latest, removePublishedComic, getFilteredComics, resetToDemo, getContinueReading, getRecommendedComics, getCurrentStreak, getAchievements, getLikedComics, previewCreatorImport, validateAndImportCreatorComic, importCreatorPublishedComics, importCreatorComic, getMyUploadedComics, isSubscriptionActive, isEventFree } = useComics();
+  const { trending, latest, removePublishedComic, getFilteredComics, resetToDemo, getContinueReading, getRecommendedComics, getCurrentStreak, getAchievements, getLikedComics, previewCreatorImport, validateAndImportCreatorComic, importCreatorPublishedComics, importCreatorComic, getMyUploadedComics } = useComics();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -20,9 +20,6 @@ export default function HomePage() {
   const [sourceFilter, setSourceFilter] = useState<'all' | 'creator' | 'official'>("all");
   const [statusFilter, setStatusFilter] = useState<'all' | 'ongoing' | 'completed'>("all");
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'az' | 'za' | 'mostChapters' | 'popular' | 'trending' | 'byCoins'>("newest");
-
-  // For unified My Library tabs (client UI state only, per DESIGN-my-library-upload.md)
-  const [myLibraryTab, setMyLibraryTab] = useState<'all' | 'uploaded' | 'unlocked' | 'liked' | 'progress'>('all');
 
   // Creator import preview/validation flow
   const [importPreview, setImportPreview] = useState<any>(null);
@@ -45,7 +42,7 @@ export default function HomePage() {
 
   const handleDeleteComic = (id: string) => {
     // Find the comic title for a better confirmation message
-    const allComics = [...trending, ...latest, ...myUnlockedComics, ...filtered];
+    const allComics = [...trending, ...latest, ...filtered];
     const comic = allComics.find((c) => c.id === id);
     const title = comic?.title || 'this comic';
 
@@ -166,18 +163,6 @@ export default function HomePage() {
         <span>❤️ Liked: {getLikedComics ? getLikedComics().length : 0}</span>
       </div>
 
-      {/* Limited event banner (demo) */}
-      {isSubscriptionActive && isSubscriptionActive() && (
-        <div className="mx-auto max-w-7xl px-4 pt-3 sm:px-6">
-          <div className="text-xs rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-2 text-emerald-400">30-day subscription active — all premium chapters free!</div>
-        </div>
-      )}
-      {isEventFree && isEventFree('', 0) && (
-        <div className="mx-auto max-w-7xl px-4 pt-3 sm:px-6">
-          <div className="text-xs rounded-xl bg-blue-500/10 border border-blue-500/30 px-4 py-2 text-blue-400">Limited-Time Event active — premium chapters are free!</div>
-        </div>
-      )}
-
       {/* UNIFIED "MY LIBRARY" (highest priority from DESIGN-my-library-upload.md) */}
       {/* Combines Uploaded (user-created via /upload or /creator), Unlocked (premium flow), Favorites/Liked, In-Progress (from history/continue) */}
       {/* Uses existing context selectors only — no new state. Reuses ComicCard + filters. Simple client tabs. */}
@@ -190,10 +175,10 @@ export default function HomePage() {
           <Link href="/creator" className="hidden text-sm text-[var(--accent)] hover:underline md:block">Manage uploads &amp; drafts →</Link>
         </div>
 
-        {/* My Library (monetizing removed) */}
-      <div className="mx-auto max-w-7xl px-4 pt-10 sm:px-6 text-xs text-[var(--text-muted)]">
-        My Library (uploaded, liked, progress) available via Creator Dashboard and filters. All chapters are freely readable.
-      </div>
+        {/* My Library note — full dedicated /library page coming with Supabase */}
+        <div className="mx-auto max-w-7xl px-4 pt-2 pb-4 sm:px-6 text-xs text-[var(--text-muted)]">
+          Sign in for the full personal Library (uploaded + favorites + progress) and public comics discovery. Creator uploads and local data remain available.
+        </div>
       </div>
 
       {/* TRENDING THIS WEEK - enhanced as horizontal carousel */}
@@ -239,38 +224,6 @@ export default function HomePage() {
             />
           ))}
         </div>
-      </div>
-
-      {/* MY UNLOCKED COMICS section removed (monetizing features removed) */}
-      {/* <div className="mx-auto max-w-7xl px-4 pt-12 sm:px-6">
-        <div className="mb-4">
-          <div className="text-xs font-semibold uppercase tracking-[1px] text-amber-500">Your Progress</div>
-          <h2 className="text-2xl font-semibold tracking-tight">My Unlocked Comics</h2>
-        </div> */}
-
-        {filteredMyUnlocked.length === 0 && myUnlockedComics.length > 0 ? (
-          <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)]/60 p-8 text-center">
-            <div className="text-[var(--text-muted)] mb-2">No unlocked comics match your filters.</div>
-            <button onClick={clearAllFilters} className="text-sm text-[var(--accent)] hover:underline">Clear filters</button>
-          </div>
-        ) : myUnlockedComics.length === 0 ? (
-          <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)]/60 p-8 text-center">
-            <div className="text-[var(--text-muted)] mb-2">You haven't unlocked any premium chapters yet.</div>
-            <p className="text-sm text-[var(--text-muted)] max-w-md mx-auto">
-              Browse comics and use coins (10 each) to unlock premium chapters.
-            </p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7">
-            {filteredMyUnlocked.map((comic) => (
-              <ComicCard 
-                key={comic.id} 
-                comic={comic} 
-                onDelete={(comic.id.startsWith('pub-') || comic.source === 'creator' || comic.source === 'user') ? handleDeleteComic : undefined} 
-              />
-            ))}
-          </div>
-        )}
       </div>
 
       {/* BROWSE / FILTERS */}
