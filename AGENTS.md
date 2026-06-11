@@ -502,3 +502,15 @@ All per the request + DESIGN-supabase-auth.md + AGENTS process.
 - Consistent Tailwind styling matching the rest of the app (text-[var(--text-muted)], tracking-tight headings, border accents).
 - AGENTS.md updated (new route in Useful routes list + dedicated implementation note).
 - No impact on core reading, upload, library, auth, or hybrid public comic flows. Serves as the canonical place for all legal and community rules.
+
+**Build fix for useSearchParams() (this request)**:
+- Fixed the error: "useSearchParams() should be wrapped in a suspense boundary at page "/login"" (and proactively for /signup).
+- Restructured /login/page.tsx and /signup/page.tsx:
+  - Added `import { Suspense } from "react";`
+  - Created inner client components (LoginContent, SignupContent) that contain the original logic and hooks (useSearchParams is only in the login inner component).
+  - Default exports now return `<Suspense fallback={<div className="...">Loading ... form...</div>}><InnerContent /></Suspense>`.
+  - Fallback uses app-consistent styling (max-w-md, text-[var(--text-muted)], py-16).
+- This is the recommended "correct client component pattern" (Suspense boundary around the hook usage) per Next.js. (dynamic = 'force-dynamic' is an alternative but Suspense is preferred for better static optimization where possible.)
+- Confirmed `npm run build` now succeeds fully (no more the login suspense error; pages generate as static ○).
+- AGENTS.md updated with this fix note.
+- No behavior change for users; the pages render identically at runtime. The fix only affects build-time prerendering.

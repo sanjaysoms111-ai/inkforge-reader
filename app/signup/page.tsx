@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useUser } from "../lib/UserContext";
 import { BookOpen, Mail, Lock, User as UserIcon } from "lucide-react";
 
-export default function SignupPage() {
+// Inner component (for future-proofing and consistent Suspense pattern)
+function SignupContent() {
   const router = useRouter();
   const { signUp, signInWithOAuth, loading: authLoading } = useUser();
 
@@ -156,5 +157,18 @@ export default function SignupPage() {
         You will receive 50 starter coins. First chapter of every comic is always free.
       </p>
     </div>
+  );
+}
+
+// Wrapper with Suspense boundary (for consistent pattern with login and to satisfy build requirements for client pages)
+export default function SignupPage() {
+  return (
+    <Suspense fallback={
+      <div className="mx-auto max-w-md px-4 py-16 text-center text-[var(--text-muted)]">
+        Loading signup form...
+      </div>
+    }>
+      <SignupContent />
+    </Suspense>
   );
 }

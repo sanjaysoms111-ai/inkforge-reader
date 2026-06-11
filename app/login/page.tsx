@@ -1,13 +1,16 @@
 "use client";
 
-import { useState } from "react";
+"use client";
+
+import { useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useUser } from "../lib/UserContext";
 import { motion } from "framer-motion";
 import { BookOpen, Mail, Lock, ArrowRight } from "lucide-react";
 
-export default function LoginPage() {
+// Inner component that safely uses useSearchParams (must be inside Suspense)
+function LoginContent() {
   const router = useRouter();
   const search = useSearchParams();
   const { signInWithPassword, signInWithOAuth, loading: authLoading } = useUser();
@@ -130,5 +133,18 @@ export default function LoginPage() {
         By signing in you agree to the demo terms. Configure OAuth providers in your Supabase dashboard.
       </p>
     </div>
+  );
+}
+
+// Wrapper page with Suspense boundary for useSearchParams
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="mx-auto max-w-md px-4 py-16 text-center text-[var(--text-muted)]">
+        Loading login form...
+      </div>
+    }>
+      <LoginContent />
+    </Suspense>
   );
 }
