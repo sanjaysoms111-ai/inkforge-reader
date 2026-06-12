@@ -103,8 +103,8 @@ export default function ComicDetailPage() {
             <div className="flex items-center gap-1.5">
               <BookOpen className="h-4 w-4" /> {totalChapters} chapters
             </div>
-            <div className="flex items-center gap-1.5">
-              <Eye className="h-4 w-4" /> {Math.floor(comic.views / 1000)}k views
+            <div className="flex items-center gap-1.5" title="Total views (accurate count: only increments when logged-in readers scroll to the bottom of a chapter)">
+              <Eye className="h-4 w-4" /> {((comic.views || 0) >= 1000 ? Math.floor((comic.views || 0) / 1000) + "k" : (comic.views || 0))} views
             </div>
             <div>Updated {comic.publishedAt}</div>
           </div>

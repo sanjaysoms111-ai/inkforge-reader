@@ -253,6 +253,15 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
   - Consistent styling: glass/dark theme, btn-ghost with border-[var(--accent)]/60 and text-[var(--accent)] for pink accent, matches other action buttons (motion whileTap, rounded-xl, etc.).
   - Works for public (Supabase) and private (local) comics. Uses shareLink(slug) from ComicsContext (no chapter param for comic URL).
   - Toast uses var(--accent) background for theme consistency.
+- Accurate View Counting (Per AGENTS + DESIGN-supabase-auth.md):
+  - A view increments ONLY when logged-in user opens a chapter AND scrolls far enough for the *last panel* to become ~85% visible (IntersectionObserver on the wrapper of the final SmartImage panel in reader).
+  - Counted once per (user_id + comic_slug + chapter_number) via new chapter_views table (PK unique) + server action record-chapter-view.
+  - Works for public comics (any logged-in reader) and private comics (the owner reading their own via slug link counts).
+  - Server action: cookie-based Supabase client does the insert (RLS enforces user_id), then rpc to SECURITY DEFINER increment_comic_views which +1's the existing comics.views cached column (no new column added to comics for compat; the pre-existing `views` is used).
+  - Display: Eye icon + count (exact or Xk) on /comics/[slug] (already present, now accurate) and inside reader header (added badge under chapter title). Live optimistic via recordChapterView on ComicsContext (setComics +1, revert on duplicate).
+  - Contexts: ComicsContext exposes recordChapterView (used by reader); legacy recordCreatorView for source==='creator' comics untouched.
+  - RLS + table creation: appended to SUPABASE_RLS_POLICIES.sql (run the chapter_views + function section in SQL Editor).
+  - Test: (a) Login A, publish Public comic. (b) From B (different account or incognito after login), open a chapter, scroll all the way through panels until last panel is visible → console "[Reader] Last panel visible — recording...", views number increases on detail and in reader. Repeat on same chapter in same session: no double count. (c) Owner of a private comic: open its reader + scroll to bottom also increments. Cross-account + private both supported. First-chapter-free / hybrid / RLS / all other invariants preserved. npm run build clean.
 - Chapter list Suspense skeleton in detail
 - Dynamic loaded BuyCoinsModal
 - Post/like/react/delete comment
@@ -281,7 +290,9 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - `app/globals.css` — design tokens (dual theme), glass, cards, animations
 - `app/components/` — SmartImage, Skeleton, ComicCard, ChapterListItem, BuyCoinsModal (dynamic), RegisterSW, InstallPrompt (PWA), plus Advanced Upload: DropZone, UploadProgress, PreviewReaderModal
 - `app/actions/publish-public.ts` — Server action for secure public comic+chapters insert (post-Storage) using authenticated server Supabase client + revalidate
+- `app/actions/record-chapter-view.ts` — Server action for accurate view counting: inserts to chapter_views (unique per user+slug+ch) then bumps cached comics.views via definer function. Called only after IO on last panel in reader.
 - `SUPABASE_RLS_POLICIES.sql` (project root) — Exact executable CREATE POLICY SQL for comics (INSERT/UPDATE/DELETE owner + public SELECT) + chapters (via parent comic ownership). This is the fix for the "new row violates row-level security policy for table 'comics'" error. Also referenced in improved error messages.
+  - Includes the chapter_views table + RLS policies + SECURITY DEFINER increment_comic_views(p_slug) function for accurate view counting (run the bottom "CHAPTER VIEWS" block when enabling this feature).
 - `app/lib/pwa.ts` — SW registration, useOnlineStatus hook, notifySWToCachePanels (for reader/download)
 - `public/sw.js` — Cache-first image/panel strategy + message-driven pre-cache for offline chapters
 - `app/manifest.ts` — PWA manifest (standalone, theme-matched, icons)
@@ -333,6 +344,7 @@ All additions go through ComicsContext, preserve premium flow and creator comics
 - "My Library" dedicated page (/library) — personal uploads + unlocked + favorites + public discovery.
 - Published comics (with public/private flag) visible to all logged-in users.
 - Premium coin system + first-chapter-free rule re-enabled under server control (shared public comics).
+- Accurate view counting added: chapter_views table (unique per user+slug+ch) + server action + IO in reader (last panel) + optimistic bump in ComicsContext. Reuses existing comics.views column + display locations. Works for public and private. (See testing checklist + SUPABASE_RLS_POLICIES.sql for the SQL block.) All prior invariants untouched.
 - Uploaded comics (via /upload or /creator) can be marked public (uploads images to Supabase Storage + inserts to DB) or kept private (local data: only).
 - Clean separation: new `UserContext` + `app/lib/supabase/*` clients; `ComicsContext` remains sole source for the merged catalog (local private/creator bridge + server public comics when authed).
 - Server components/actions + RLS for security. Middleware route protection.

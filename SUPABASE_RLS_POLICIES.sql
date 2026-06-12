@@ -168,5 +168,79 @@ WITH CHECK (
 COMMENT ON TABLE public.comics IS 'RLS policies fixed for owner-based insert/update/delete + public read. See SUPABASE_RLS_POLICIES.sql';
 COMMENT ON TABLE public.chapters IS 'RLS policies fixed (parent comic ownership). See SUPABASE_RLS_POLICIES.sql';
 
--- Done. Paste the whole file (or the relevant sections) into Supabase SQL Editor and click Run.
+-- ============================================================================
+-- CHAPTER VIEWS + ACCURATE VIEW COUNTING (added for "accurate View Counting" feature)
+-- ============================================================================
+-- Requirements:
+-- - A view is only counted when a logged-in user opens a chapter AND scrolls to the bottom (last panel visible).
+-- - Count exactly once per (user, comic_slug, chapter_number) using unique constraint.
+-- - Works for both public comics (any logged-in reader) and private comics (owner or direct link).
+-- - Uses server action (record-chapter-view) + RLS.
+-- - Cached total kept in existing comics.views column (already present in schema + normalize + UI display).
+--   (Optional: you may also ALTER ADD total_views if you prefer a dedicated name; code uses `views` for compat.)
+--
+-- Run this section (and the table/policies) in Supabase SQL Editor after the main comics/chapters RLS.
+-- Re-run is safe (DROP IF EXISTS + IF NOT EXISTS).
+-- ============================================================================
+
+-- 1. Create the tracking table (unique per user+slug+chapter_number prevents double counting)
+CREATE TABLE IF NOT EXISTS public.chapter_views (
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  comic_slug text NOT NULL,
+  chapter_number integer NOT NULL,
+  viewed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, comic_slug, chapter_number)
+);
+
+-- Enable RLS (safe if already on)
+ALTER TABLE public.chapter_views ENABLE ROW LEVEL SECURITY;
+
+-- Drop prior versions for re-apply safety
+DROP POLICY IF EXISTS "chapter_views_insert_own" ON public.chapter_views;
+DROP POLICY IF EXISTS "chapter_views_select_own" ON public.chapter_views;
+
+-- INSERT: any authenticated user can record their own view (RLS + PK enforces once-per-user-per-chapter).
+-- This allows public comic readers + owners of private comics (via direct link) to contribute accurately.
+CREATE POLICY "chapter_views_insert_own"
+ON public.chapter_views
+FOR INSERT
+WITH CHECK (user_id = auth.uid());
+
+-- SELECT: users can see their own view records (useful for future "read history" or per-chapter stats).
+-- Comic owners can be given broader visibility later via a separate policy or view if needed.
+CREATE POLICY "chapter_views_select_own"
+ON public.chapter_views
+FOR SELECT
+USING (user_id = auth.uid());
+
+-- 2. SECURITY DEFINER helper to safely increment the cached counter (comics.views)
+--    Called from the server action after a successful new chapter_view row.
+--    This bypasses the strict "only owner can UPDATE comics" policy just for the counter.
+--    The function only does +1 on the views column for the matching slug; no other mutations possible.
+CREATE OR REPLACE FUNCTION public.increment_comic_views(p_slug text)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE public.comics
+  SET views = views + 1
+  WHERE slug = p_slug;
+$$;
+
+-- Grant execute to authenticated users (so the server action running as the user can call it)
+GRANT EXECUTE ON FUNCTION public.increment_comic_views(text) TO authenticated;
+
+-- (Optional) If you prefer a dedicated column name, uncomment and the action can be updated to use it:
+-- ALTER TABLE public.comics ADD COLUMN IF NOT EXISTS total_views bigint NOT NULL DEFAULT 0;
+-- Then adjust increment function + normalize to also mirror into total_views or prefer it.
+
+COMMENT ON TABLE public.chapter_views IS 'Accurate once-per-user-per-chapter view tracking. Used with comics.views cached total. RLS + server action enforce rules.';
+COMMENT ON FUNCTION public.increment_comic_views(text) IS 'SECURITY DEFINER counter bump for comics.views (called only after chapter_views unique insert succeeds).';
+
+-- Verification after apply:
+-- SELECT schemaname, tablename, policyname FROM pg_policies WHERE tablename = 'chapter_views';
+-- \df public.increment_comic_views
+
+-- Done with views section. Re-apply whole file or just this block when adding view counting.
 -- Then test the /upload Public flow.

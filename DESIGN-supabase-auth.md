@@ -110,6 +110,19 @@ create index if not exists idx_comics_public on public.comics(is_public, publish
 create index if not exists idx_chapters_comic on public.chapters(comic_id, number);
 create index if not exists idx_unlocks_user on public.unlocks(user_id);
 create index if not exists idx_progress_user_slug on public.reading_progress(user_id, slug);
+
+-- 8. Chapter views (accurate once-per-user-per-chapter counting for public + private comics)
+--    Insert only happens from server action after client-side IntersectionObserver on last panel.
+--    PK unique enforces "count once per user per chapter".
+--    A SECURITY DEFINER function (or direct update in action) bumps the cached `comics.views` (existing column).
+create table if not exists public.chapter_views (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  comic_slug text not null,
+  chapter_number integer not null,
+  viewed_at timestamptz not null default now(),
+  primary key (user_id, comic_slug, chapter_number)
+);
+create index if not exists idx_chapter_views_slug_ch on public.chapter_views(comic_slug, chapter_number);
 ```
 
 **Storage**:
@@ -216,6 +229,7 @@ One-time migration is optimistic + best-effort (ignore duplicates via unique con
   See SUPABASE_RLS_POLICIES.sql for the exact "chapters_select_public" + "chapters_owner_all" policies.
   - `unlocks/progress/favorites`: `user_id = auth.uid()`.
   - `comments`: SELECT if comic public (or owner); INSERT any authenticated; DELETE own comment or comic owner.
+- `chapter_views`: INSERT only with user_id = auth.uid() (any authenticated reader of a viewable comic can contribute a once-per-chapter view). SELECT own rows. The actual comics.views bump uses a SECURITY DEFINER helper so non-owners can safely increment the public counter after the unique chapter_views row is created. Policies + function are in SUPABASE_RLS_POLICIES.sql (views section).
 - **Never client-direct balance mutation**. Use `spend_coins_and_unlock` RPC (security definer) or server action that calls it. Server action for "mock buy coins" adds to balance (self only).
 - Client uses only anon key + user JWT (via supabase client). Server uses anon key + cookies for user context.
 - Image uploads for public: only owner can put to their path; public read via bucket policy.

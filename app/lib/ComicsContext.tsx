@@ -14,6 +14,7 @@ import { getSupabaseBrowserClient } from "./supabase/client";
 import { useUser } from "./UserContext";
 import { uploadComicMediaToStorage, prepareMediaForUpload } from "./supabase/storage";
 import { publishPublicComic } from "../actions/publish-public";
+import { recordChapterView as recordChapterViewAction } from "../actions/record-chapter-view";
 
 // Bridge format published by the inkforg_apexpanel Creator App
 // (extended to support real per-panel dialogues from newer Creator exports)
@@ -150,6 +151,12 @@ interface ComicsContextType {
   // Creator analytics (mock views + unlocks computed from existing state; incremented on read)
   getCreatorAnalytics: (slug: string) => { views: number; unlockCount: number } | null;
   recordCreatorView: (slug: string) => void;
+
+  // Accurate view counting (Supabase-backed for public + private comics).
+  // Called from reader only after user scrolls to bottom of last panel.
+  // Uses chapter_views unique constraint + increments cached comics.views.
+  // Optimistic local bump for instant UI (lists, detail, reader). Deduped server-side.
+  recordChapterView: (slug: string, chapterNumber: number) => Promise<void>;
 
   // Strengthened creator bridge: preview + validation before import
   previewCreatorImport: (data: any) => { valid: boolean; errors: string[]; preview: any };
@@ -1350,6 +1357,35 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  // Accurate chapter view recorder for hybrid (public Supabase + private owner comics).
+  // - Optimistic +1 immediately so counts in detail/reader/home lists update live.
+  // - Server action does the real work: chapter_views INSERT (once-per-user-per-ch via PK) + increment via definer func.
+  // - If server reports alreadyRecorded we revert the optimistic bump.
+  // - Safe/no-op for anonymous or missing comic. Separate from legacy recordCreatorView (creator bridge only).
+  const recordChapterView = useCallback(async (slug: string, chapterNumber: number) => {
+    if (!slug || !chapterNumber) return;
+    try {
+      // Optimistic for real-time feel across the app (ComicsContext is the source of truth)
+      setComics((prev) =>
+        prev.map((c) => (c.slug === slug ? { ...c, views: (c.views || 0) + 1 } : c))
+      );
+
+      const res = await recordChapterViewAction(slug, chapterNumber);
+      if (res && res.alreadyRecorded) {
+        // Duplicate (race or second tab) — server did not increment; revert our +1
+        setComics((prev) =>
+          prev.map((c) =>
+            c.slug === slug ? { ...c, views: Math.max(0, (c.views || 1) - 1) } : c
+          )
+        );
+      }
+      // On success the server also did revalidatePath for /comics/[slug] etc.
+    } catch (e) {
+      console.warn('[ComicsContext] recordChapterView action failed (view count may lag until reload)', e);
+      // Do not revert optimistic on transient error; reload will get server truth
+    }
+  }, []);
+
   // Preview + validation for creator imports (structural strengthening of bridge)
   const previewCreatorImport = useCallback((data: any) => {
     const errors: string[] = [];
@@ -1674,6 +1710,7 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
     copyChapterLink,
     getCreatorAnalytics,
     recordCreatorView,
+    recordChapterView,
     previewCreatorImport,
     validateAndImportCreatorComic,
     isChapterCached,
