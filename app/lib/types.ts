@@ -80,6 +80,7 @@ export interface Comment {
   reactions: Record<string, number>; // e.g. { "❤️": 5, "😂": 2 }
   parentId?: string; // for nested replies
   avatar?: string; // optional seed or emoji for avatar (client-generated)
+  userId?: string; // Supabase user id (for "delete own" checks on public comments). Local comments may omit.
 }
 
 export interface Achievement {

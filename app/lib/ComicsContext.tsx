@@ -15,6 +15,12 @@ import { useUser } from "./UserContext";
 import { uploadComicMediaToStorage, prepareMediaForUpload } from "./supabase/storage";
 import { publishPublicComic } from "../actions/publish-public";
 import { recordChapterView as recordChapterViewAction } from "../actions/record-chapter-view";
+import {
+  createComment as createCommentAction,
+  likeComment as likeCommentAction,
+  addReaction as addReactionAction,
+  deleteComment as deleteCommentAction,
+} from "../actions/comments";
 
 // Bridge format published by the inkforg_apexpanel Creator App
 // (extended to support real per-panel dialogues from newer Creator exports)
@@ -123,12 +129,16 @@ interface ComicsContextType {
   // Simple recommendation engine (genre overlap from unlocked/history/bookmarks)
   getRecommendedComics: (limit?: number) => Comic[];
 
-  // Comments & Reactions (enhanced with nested replies)
+  // Comments & Reactions (enhanced with nested replies + hybrid public/Supabase support)
   getCommentsForChapter: (slug: string, chapterNumber: number) => Comment[];
   addComment: (slug: string, chapterNumber: number, text: string, author: string, initialReaction?: string, parentId?: string) => void;
   likeComment: (slug: string, chapterNumber: number, commentId: string) => void;
   addReaction: (slug: string, chapterNumber: number, commentId: string, emoji: string) => void;
   deleteComment: (slug: string, chapterNumber: number, commentId: string) => void;
+
+  // New: explicit loader for public (Supabase) comments. Call on reader open for isPublic comics.
+  // Private comics ignore this (their comments live only in the LS-backed state).
+  loadPublicCommentsForChapter: (slug: string, chapterNumber: number) => Promise<void>;
   displayName: string;
   setDisplayName: (name: string) => void;
 
@@ -280,6 +290,12 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
 
   // Hybrid Supabase support (public comics)
   const { user } = useUser();
+
+  // Ref for latest comics list inside callbacks (used to decide public vs local comment path without stale closures)
+  const comicsRef = React.useRef(comics);
+  React.useEffect(() => {
+    comicsRef.current = comics;
+  }, [comics]);
 
   // Normalize a row from Supabase (comics + joined chapters) to internal Comic shape (https panels)
   function normalizeSupabaseComic(row: any): Comic {
@@ -986,8 +1002,49 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
 
 
 
-  // --- Comments & Reactions ---
+  // --- Comments & Reactions (hybrid: localStorage for private comics, Supabase for public) ---
   const getCommentKey = (slug: string, chapterNumber: number) => `${slug}:${chapterNumber}`;
+
+  /**
+   * Load authoritative comments for a *public* comic from Supabase into local state.
+   * Called by reader (and optionally detail) when a public comic chapter is opened.
+   * Overwrites the in-memory list for that key (server is truth for public).
+   * Private comics continue to use the LS-backed path exclusively.
+   */
+  const loadPublicCommentsForChapter = useCallback(async (slug: string, chapterNumber: number) => {
+    if (!user?.id) return; // only meaningful when logged (public comments are readable but posting requires auth)
+    try {
+      const supabase = getSupabaseBrowserClient();
+      const { data, error } = await supabase
+        .from("comments")
+        .select("*")
+        .eq("slug", slug)
+        .eq("chapter_number", chapterNumber)
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        console.warn("[ComicsContext] loadPublicComments error", error.message);
+        return;
+      }
+
+      const mapped: Comment[] = (data || []).map((row: any) => ({
+        id: row.id,
+        author: row.author_display || "Reader",
+        text: row.text,
+        timestamp: row.created_at,
+        likes: row.likes || 0,
+        reactions: (row.reactions as Record<string, number>) || {},
+        parentId: row.parent_id || undefined,
+        userId: row.user_id || undefined,
+        avatar: (row.author_display || "R")[0]?.toUpperCase() || "?",
+      }));
+
+      const key = getCommentKey(slug, chapterNumber);
+      setComments((prev) => ({ ...prev, [key]: mapped }));
+    } catch (e) {
+      console.warn("[ComicsContext] loadPublicCommentsForChapter failed (graceful)", e);
+    }
+  }, [user?.id]);
 
   const getCommentsForChapter = useCallback((slug: string, chapterNumber: number): Comment[] => {
     const key = getCommentKey(slug, chapterNumber);
@@ -1022,7 +1079,26 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
 
     // light achievement trigger for first comment etc.
     setTimeout(() => checkAchievementsInternal(), 10);
-  }, []);
+
+    // Hybrid public sync (optimistic already done above for instant UI)
+    // Only for comics that live in Supabase (isPublic). Private stay 100% localStorage.
+    (async () => {
+      try {
+        const target = comicsRef.current.find((c) => c.slug === slug);
+        if (target?.isPublic && user?.id) {
+          await createCommentAction({
+            slug,
+            chapterNumber,
+            text,
+            parentId,
+            authorDisplay: author,
+          });
+        }
+      } catch (e) {
+        console.warn("[ComicsContext] public createCommentAction failed (optimistic kept, will reconcile on reload)", e);
+      }
+    })();
+  }, [user?.id]);
 
   const likeComment = useCallback((slug: string, chapterNumber: number, commentId: string) => {
     const key = getCommentKey(slug, chapterNumber);
@@ -1033,7 +1109,19 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       );
       return { ...prev, [key]: updated };
     });
-  }, []);
+
+    // Hybrid public: bump via server action (definer function keeps RLS simple)
+    (async () => {
+      try {
+        const target = comicsRef.current.find((c) => c.slug === slug);
+        if (target?.isPublic && user?.id) {
+          await likeCommentAction(commentId);
+        }
+      } catch (e) {
+        console.warn("[ComicsContext] public likeCommentAction failed (optimistic kept)", e);
+      }
+    })();
+  }, [user?.id]);
 
   const addReaction = useCallback((slug: string, chapterNumber: number, commentId: string, emoji: string) => {
     const key = getCommentKey(slug, chapterNumber);
@@ -1051,7 +1139,19 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       });
       return { ...prev, [key]: updated };
     });
-  }, []);
+
+    // Hybrid public sync
+    (async () => {
+      try {
+        const target = comicsRef.current.find((c) => c.slug === slug);
+        if (target?.isPublic && user?.id) {
+          await addReactionAction(commentId, emoji);
+        }
+      } catch (e) {
+        console.warn("[ComicsContext] public addReactionAction failed (optimistic kept)", e);
+      }
+    })();
+  }, [user?.id]);
 
   const deleteComment = useCallback((slug: string, chapterNumber: number, commentId: string) => {
     const key = getCommentKey(slug, chapterNumber);
@@ -1060,7 +1160,19 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       const updated = existing.filter((c) => c.id !== commentId);
       return { ...prev, [key]: updated };
     });
-  }, []);
+
+    // Hybrid public delete (RLS allows owner or comic owner)
+    (async () => {
+      try {
+        const target = comicsRef.current.find((c) => c.slug === slug);
+        if (target?.isPublic && user?.id) {
+          await deleteCommentAction(commentId, slug);
+        }
+      } catch (e) {
+        console.warn("[ComicsContext] public deleteCommentAction failed (local removal kept)", e);
+      }
+    })();
+  }, [user?.id]);
 
   const setDisplayName = useCallback((name: string) => {
     setDisplayNameState(name.trim());
@@ -1680,12 +1792,13 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
     searchComics,
     getFilteredComics,
 
-    // Comments & Reactions
+    // Comments & Reactions (hybrid local + Supabase public)
     getCommentsForChapter,
     addComment,
     likeComment,
     addReaction,
     deleteComment,
+    loadPublicCommentsForChapter,
     displayName,
     setDisplayName,
     getReadingProgress,

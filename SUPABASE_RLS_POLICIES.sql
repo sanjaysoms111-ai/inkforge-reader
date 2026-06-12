@@ -243,4 +243,112 @@ COMMENT ON FUNCTION public.increment_comic_views(text) IS 'SECURITY DEFINER coun
 -- \df public.increment_comic_views
 
 -- Done with views section. Re-apply whole file or just this block when adding view counting.
+
+-- ============================================================================
+-- ADVANCED COMMENTS (threaded replies + likes + multi-emoji reactions via JSONB)
+-- ============================================================================
+-- Extends the existing comments table (from DESIGN-supabase-auth.md).
+-- - reactions jsonb stores { "❤️": N, "😂": M, ... }
+-- - likes remains the dedicated like/heart counter (or can be treated as special reaction)
+-- - Top sort (in UI) weights total (likes + sum of all reaction counts) so emoji-rich comments rise.
+-- - RLS: public read for comments on is_public comics (via slug), authenticated insert own, delete by owner or comic owner.
+-- - Counter mutations via SECURITY DEFINER functions (so RLS on table can stay strict for content; anyone authenticated can engage on public comments).
+-- - Works only for public (Supabase) comics; private comics keep comments in client localStorage via existing ComicsContext.
+--
+-- Run after the main table create + previous RLS blocks. Safe to re-run.
+-- ============================================================================
+
+-- 1. Extend table with reactions JSONB (additive, default empty object)
+ALTER TABLE public.comments
+  ADD COLUMN IF NOT EXISTS reactions jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+-- Optional helpful index (for future queries; not required for current client-side sort)
+CREATE INDEX IF NOT EXISTS idx_comments_slug_ch_created ON public.comments (slug, chapter_number, created_at);
+
+-- 2. RLS for comments (drop first for re-apply safety)
+ALTER TABLE public.comments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "comments_select_public_or_owner" ON public.comments;
+DROP POLICY IF EXISTS "comments_insert_own" ON public.comments;
+DROP POLICY IF EXISTS "comments_delete_own_or_comic_owner" ON public.comments;
+DROP POLICY IF EXISTS "comments_update_own" ON public.comments;
+
+-- SELECT: anyone can read comments belonging to a public comic (or the comic owner can see comments on their private too).
+-- Uses slug denorm to join to comics.is_public (no need to change schema to comic_id for comments).
+CREATE POLICY "comments_select_public_or_owner"
+ON public.comments
+FOR SELECT
+USING (
+  EXISTS (
+    SELECT 1 FROM public.comics c
+    WHERE c.slug = comments.slug
+      AND (c.is_public = true OR c.owner_id = auth.uid())
+  )
+);
+
+-- INSERT: only authenticated users, and they must set user_id to themselves. author_display etc supplied by client/server action.
+CREATE POLICY "comments_insert_own"
+ON public.comments
+FOR INSERT
+WITH CHECK (user_id = auth.uid());
+
+-- DELETE: comment author OR the owner of the parent comic (via slug) can delete (moderation / own cleanup).
+CREATE POLICY "comments_delete_own_or_comic_owner"
+ON public.comments
+FOR DELETE
+USING (
+  user_id = auth.uid()
+  OR EXISTS (
+    SELECT 1 FROM public.comics c
+    WHERE c.slug = comments.slug
+      AND c.owner_id = auth.uid()
+  )
+);
+
+-- Note: We do NOT allow arbitrary UPDATE on the row via RLS for content safety.
+-- Likes and reactions are ONLY mutated via the definer functions below (called from trusted server actions).
+
+-- 3. SECURITY DEFINER functions for safe public engagement counters
+-- These allow any authenticated reader to +1 like or a specific emoji reaction on a comment
+-- without being able to edit text or other fields. RLS on table can stay owner-strict for content.
+
+CREATE OR REPLACE FUNCTION public.increment_comment_likes(p_comment_id uuid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE public.comments SET likes = likes + 1 WHERE id = p_comment_id;
+$$;
+
+CREATE OR REPLACE FUNCTION public.add_comment_reaction(p_comment_id uuid, p_emoji text)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE public.comments
+  SET reactions = jsonb_set(
+    COALESCE(reactions, '{}'::jsonb),
+    ARRAY[p_emoji],
+    (COALESCE( (reactions ->> p_emoji)::int , 0 ) + 1 )::text::jsonb,
+    true
+  )
+  WHERE id = p_comment_id;
+$$;
+
+-- Allow authenticated callers (server actions run with the user's JWT) to execute the engagement bumps.
+GRANT EXECUTE ON FUNCTION public.increment_comment_likes(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.add_comment_reaction(uuid, text) TO authenticated;
+
+COMMENT ON TABLE public.comments IS 'Threaded comments for public comics (private stay local). reactions jsonb + likes for engagement. See advanced comments section in SUPABASE_RLS_POLICIES.sql';
+COMMENT ON FUNCTION public.increment_comment_likes(uuid) IS 'SECURITY DEFINER: safely +1 likes counter (called from server action after RLS/auth).';
+COMMENT ON FUNCTION public.add_comment_reaction(uuid, text) IS 'SECURITY DEFINER: safely +1 a specific emoji in the reactions jsonb (no text mutation possible).';
+
+-- Verification
+-- SELECT policyname, cmd FROM pg_policies WHERE tablename = 'comments';
+-- \df public.increment_comment_likes
+-- \df public.add_comment_reaction
+
+-- End of advanced comments RLS block. Re-run as needed when updating comment features.
 -- Then test the /upload Public flow.

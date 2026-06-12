@@ -175,7 +175,7 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - Creator comics get emerald "created using AI on inkforg_apexpanel" badges
 - `isPremium` flag drives gating + "PREMIUM • 10" / "FREE" badges (display + logic)
 - All localStorage keys preserved (including coins/unlocked)
-- Comments/reactions are per-chapter (keyed by slug + chapter number)
+- Comments/reactions are per-chapter (keyed by slug + chapter number). Now advanced/hybrid (threaded replies, likes + emoji reactions JSONB, Top sort weights reactions, server actions for public, LS-only for private). See testing checklist.
 - Delete only allowed for `pub-*` or `source === 'creator'`
 - Slugs must stay unique (context has collision handling)
 - Images can be data: URLs (self-contained demos) or real URLs — use SmartImage for opt
@@ -262,6 +262,16 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
   - Contexts: ComicsContext exposes recordChapterView (used by reader); legacy recordCreatorView for source==='creator' comics untouched.
   - RLS + table creation: appended to SUPABASE_RLS_POLICIES.sql (run the chapter_views + function section in SQL Editor).
   - Test: (a) Login A, publish Public comic. (b) From B (different account or incognito after login), open a chapter, scroll all the way through panels until last panel is visible → console "[Reader] Last panel visible — recording...", views number increases on detail and in reader. Repeat on same chapter in same session: no double count. (c) Owner of a private comic: open its reader + scroll to bottom also increments. Cross-account + private both supported. First-chapter-free / hybrid / RLS / all other invariants preserved. npm run build clean.
+- Advanced Comment System (Per AGENTS + DESIGN-supabase-auth.md + existing comments table):
+  - Full threaded comments in reader (below panels): parent_id replies with visual indentation + recursive children.
+  - Likes (dedicated heart counter) + multiple emoji reactions stored in reactions JSONB on the comments row. Clicking a reaction pill or picker +1s it.
+  - Three sorts in CommentSection: Top (highest likes + sum(reactions) first — "more emoji reactions float higher"), Newest, Oldest. Client-side sort for speed.
+  - Modern engaging UI: glass cards, quick emoji bar, inline reply composer per item, avatar (initial), relative timestamps, own-delete with confirm, emoji picker popover per comment, optimistic updates.
+  - Hybrid: public (isPublic) comics — loaded from Supabase on open via loadPublicCommentsForChapter + mutations go through server actions (create/like/addReaction/delete) + context optimistic. Private comics — stay exclusively in the original localStorage COMMENTS_KEY path (never touch the shared table).
+  - Server actions in app/actions/comments.ts + 2 new definer SQL functions (increment_comment_likes, add_comment_reaction) + RLS policies (select public via comic slug, insert own, delete own-or-comic-owner). Table extended with reactions jsonb column (ALTER in SUPABASE_RLS_POLICIES.sql).
+  - Contexts: all existing comment methods (get/add/like/addReaction/delete) preserved + enhanced for hybrid branching; new loadPublicCommentsForChapter exposed.
+  - Type: Comment extended additively with optional userId.
+  - Test (after running the comments SQL block): On a published Public comic, as logged-in user post root + reply, like, add several different emojis, switch between the three sorts (verify Top promotes high-reaction comments), delete your own. Verify from another account the comments appear (cross-account). For a private (local) comic the comments UI works exactly as before using LS only. No impact on first-chapter-free, hybrid merge, creator imports, RLS for other tables, or view counting. npm run build clean. Detail page may get a light teaser in future; reader has the full section.
 - Chapter list Suspense skeleton in detail
 - Dynamic loaded BuyCoinsModal
 - Post/like/react/delete comment
@@ -288,9 +298,11 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - `app/read/[slug]/[chapter]/page.tsx` — the actual reader (vertical default + paged mode, auto-scroll w/ speed, zoom/pinch, brightness/contrast, fullscreen, progress save/restore, continue banner on home, chapter drawer, thumbnails, keyboard, swipe, download chapter as ZIP (offline, unlocked only), bookmarks (page/chapter), history modal (last 20), custom reading direction (vertical/rtl/ltr) and fit options (width/height/contain/original) with live apply and persistence). Includes prominent **Share** button in header (shares comic URL, uses native Web Share API or clipboard + "Link copied!" toast). Premium lock & panel URLs exactly as before. Now also integrates PWA offline: useOnlineStatus banner, auto + download-triggered cacheChapterForOffline + notifySWToCachePanels so unlocked chapters work fully offline via SW image cache + local state.
 - Context now exposes: getBookmarks, toggleBookmark, is*Bookmarked, getReadingHistory, addToHistory, getReaderSettings, updateReaderSettings, **shareLink(slug)** (comic URL share with Web Share + "Link copied!" toast; legacy copyChapterLink) (for QOL features). New localStorage keys: bookmarks, history, readerSettings.
 - `app/globals.css` — design tokens (dual theme), glass, cards, animations
-- `app/components/` — SmartImage, Skeleton, ComicCard, ChapterListItem, BuyCoinsModal (dynamic), RegisterSW, InstallPrompt (PWA), plus Advanced Upload: DropZone, UploadProgress, PreviewReaderModal
+- `app/components/` — SmartImage, Skeleton, ComicCard, ChapterListItem, BuyCoinsModal (dynamic), RegisterSW, InstallPrompt (PWA), plus Advanced Upload: DropZone, UploadProgress, PreviewReaderModal; plus new CommentSection + CommentItem (advanced threaded comments UI).
 - `app/actions/publish-public.ts` — Server action for secure public comic+chapters insert (post-Storage) using authenticated server Supabase client + revalidate
-- `app/actions/record-chapter-view.ts` — Server action for accurate view counting: inserts to chapter_views (unique per user+slug+ch) then bumps cached comics.views via definer function. Called only after IO on last panel in reader.
+- `app/actions/record-chapter-view.ts` — Server action for accurate view counting.
+- `app/actions/comments.ts` — Server actions for advanced comments (createComment, likeComment, addReaction, deleteComment). Use cookie server client + SECURITY DEFINER rpcs for safe counter bumps on likes/reactions. RLS + public comic scoping.
+- New components: `app/components/CommentSection.tsx` + `CommentItem.tsx` (modern threaded webtoon-style comments: glass, emoji reactions with picker/pills, like, reply inline forms, Top/Newest/Oldest sort where Top heavily weights total emoji reactions + likes, ownership delete, optimistic via context).
 - `SUPABASE_RLS_POLICIES.sql` (project root) — Exact executable CREATE POLICY SQL for comics (INSERT/UPDATE/DELETE owner + public SELECT) + chapters (via parent comic ownership). This is the fix for the "new row violates row-level security policy for table 'comics'" error. Also referenced in improved error messages.
   - Includes the chapter_views table + RLS policies + SECURITY DEFINER increment_comic_views(p_slug) function for accurate view counting (run the bottom "CHAPTER VIEWS" block when enabling this feature).
 - `app/lib/pwa.ts` — SW registration, useOnlineStatus hook, notifySWToCachePanels (for reader/download)
@@ -301,6 +313,7 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - `app/lib/uploadUtils.ts` — Shared client-side processing (MAX_PANELS=100, optimizeImage resize+WebP, generateThumbnail, filter + new checkFileSizeWarnings/formatBytes, process batch with progress) used by /upload and /creator
 - `app/lib/supabase/storage.ts` — uploadComicMediaToStorage (sequential progress, comics/{user_id}/{slug}/ path) + prepare + new uploadChapterThumbnails helper
 - `app/actions/publish-public.ts` — "use server" action: publishPublicComic (secure insert after client Storage for public comics)
+- `app/actions/comments.ts` — Server actions + mapping for advanced comments (create, like, react, delete) with definer RPCs for counters.
 - `DESIGN-upload-comic.md` + `DESIGN-creator-upload-dashboard.md` — Short design docs (base + dashboard architecture, edit methods, export, invariants)
 - Progress in context: getReadingProgress / saveReadingProgress / getContinueReading (localStorage backed)
 

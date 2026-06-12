@@ -7,6 +7,7 @@ import { ArrowLeft, List, X, Share2, Eye } from "lucide-react";
 import { useComics } from "../../../lib/ComicsContext";
 import { useUser } from "../../../lib/UserContext";
 import { SmartImage } from "../../../components/SmartImage";
+import { CommentSection } from "../../../components/CommentSection";
 
 export default function ReaderPage() {
   const params = useParams<{ slug: string; chapter: string }>();
@@ -141,9 +142,11 @@ export default function ReaderPage() {
           <button onClick={() => router.push(`/read/${comic.slug}/${chNum+1}`)} disabled={!comic.chapters.find(c=>c.number===chNum+1)} className="btn-primary px-4 py-1">Next</button>
         </div>
 
-        <div className="mt-8 text-xs text-center text-[var(--text-muted)] border-t pt-4">
-          Comments / history / settings stubs. Full features (including re-enabled premium gating for public comics) active in the implementation.
-        </div>
+        {/* Advanced Comment System — threaded replies, likes, multi-emoji reactions, Top/Newest/Oldest sort.
+            For public (Supabase) comics the list is loaded from DB on open and mutations go through server actions + optimistic in ComicsContext.
+            Private comics keep using the original localStorage-backed comments (hybrid invariant preserved).
+            Emoji reactions heavily influence "Top" ranking. */}
+        <CommentSection slug={comic.slug} chapterNumber={chNum} />
 
         {comic.isPublic && (
           <div className="mt-4 text-[10px] text-center text-amber-400/70">
