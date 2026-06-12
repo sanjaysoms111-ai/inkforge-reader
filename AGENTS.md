@@ -246,7 +246,13 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - Read free chapter end-to-end + premium (unlock with coins or buy modal) — first-chapter-free + premium flow preserved
 - Optimistic unlocks/coins + skeletons visible during actions
 - Reader panel virtualization (only visible panels rendered) + SmartImage skeletons
-- Share button in reader header and comic detail page: uses native navigator.share when available, falls back to clipboard + toast. Links are correct chapter/comic URLs.
+- Share button (prominent with Share2 icon) added on:
+  1. Comic detail page (/comics/[slug]) — shares the comic URL (/comics/slug)
+  2. Reader page (/read/[slug]/[chapter]) — shares the comic URL (not chapter-specific) when reading
+  - On click: copies URL via clipboard (or Web Share API on supported devices for native sheet), shows toast "Link copied!"
+  - Consistent styling: glass/dark theme, btn-ghost with border-[var(--accent)]/60 and text-[var(--accent)] for pink accent, matches other action buttons (motion whileTap, rounded-xl, etc.).
+  - Works for public (Supabase) and private (local) comics. Uses shareLink(slug) from ComicsContext (no chapter param for comic URL).
+  - Toast uses var(--accent) background for theme consistency.
 - Chapter list Suspense skeleton in detail
 - Dynamic loaded BuyCoinsModal
 - Post/like/react/delete comment
@@ -270,8 +276,8 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - `app/lib/mockData.ts` — empty (demo stories removed)
 - `app/page.tsx` — discovery
 - `app/comics/[slug]/page.tsx` — detail + chapters
-- `app/read/[slug]/[chapter]/page.tsx` — the actual reader (vertical default + paged mode, auto-scroll w/ speed, zoom/pinch, brightness/contrast, fullscreen, progress save/restore, continue banner on home, chapter drawer, thumbnails, keyboard, swipe, download chapter as ZIP (offline, unlocked only), bookmarks (page/chapter), history modal (last 20), custom reading direction (vertical/rtl/ltr) and fit options (width/height/contain/original) with live apply and persistence). Includes prominent **Share** button in header (native share or copy). Premium lock & panel URLs exactly as before. Now also integrates PWA offline: useOnlineStatus banner, auto + download-triggered cacheChapterForOffline + notifySWToCachePanels so unlocked chapters work fully offline via SW image cache + local state.
-- Context now exposes: getBookmarks, toggleBookmark, is*Bookmarked, getReadingHistory, addToHistory, getReaderSettings, updateReaderSettings, **shareLink** (and legacy copyChapterLink) (for QOL features). New localStorage keys: bookmarks, history, readerSettings.
+- `app/read/[slug]/[chapter]/page.tsx` — the actual reader (vertical default + paged mode, auto-scroll w/ speed, zoom/pinch, brightness/contrast, fullscreen, progress save/restore, continue banner on home, chapter drawer, thumbnails, keyboard, swipe, download chapter as ZIP (offline, unlocked only), bookmarks (page/chapter), history modal (last 20), custom reading direction (vertical/rtl/ltr) and fit options (width/height/contain/original) with live apply and persistence). Includes prominent **Share** button in header (shares comic URL, uses native Web Share API or clipboard + "Link copied!" toast). Premium lock & panel URLs exactly as before. Now also integrates PWA offline: useOnlineStatus banner, auto + download-triggered cacheChapterForOffline + notifySWToCachePanels so unlocked chapters work fully offline via SW image cache + local state.
+- Context now exposes: getBookmarks, toggleBookmark, is*Bookmarked, getReadingHistory, addToHistory, getReaderSettings, updateReaderSettings, **shareLink(slug)** (comic URL share with Web Share + "Link copied!" toast; legacy copyChapterLink) (for QOL features). New localStorage keys: bookmarks, history, readerSettings.
 - `app/globals.css` — design tokens (dual theme), glass, cards, animations
 - `app/components/` — SmartImage, Skeleton, ComicCard, ChapterListItem, BuyCoinsModal (dynamic), RegisterSW, InstallPrompt (PWA), plus Advanced Upload: DropZone, UploadProgress, PreviewReaderModal
 - `app/actions/publish-public.ts` — Server action for secure public comic+chapters insert (post-Storage) using authenticated server Supabase client + revalidate
@@ -304,10 +310,11 @@ All implementation must:
 **Comments & Light Social (2026)**: Comments now support parentId for nested replies (rendered indented in reader). Avatars are simple initials derived from author. Likes and reactions preserved/enhanced. 
 - Like/Favorite comics via new context methods + persisted likedComics (heart UI on cards + reader).
 - Reading streaks (computed from history timestamps, shown as badge) + simple achievements (unlocked on actions like first comment, N reads, likes, streak milestones, first premium). Stored in achievements array.
-- Share: `shareLink(slug, chapterNumber?)` helper (prefers `navigator.share` native sheet when available — excellent on mobile/PWA — with clipboard + toast fallback). Buttons added in:
-  - Reader sticky header (shares current chapter link).
-  - Comic detail page actions (shares comic link).
-  Legacy `copyChapterLink` alias preserved. Works great for public comics.
+- Share: `shareLink(slug)` helper (always shares the comic URL `/comics/slug`; prefers native `navigator.share` for mobile sheet, falls back to clipboard). 
+  - Prominent "Share" button (Share2 icon) on:
+    1. Comic detail page (in actions row, accent pink border/text styling).
+    2. Reader page header (next to chapter list, consistent glass/accent styling).
+  - On press: copies URL, shows toast "Link copied!". Works for public and private comics. Updated per request for exact comic URL + toast text. Legacy alias kept.
 All additions go through ComicsContext, preserve premium flow and creator comics visibility. New keys documented in persistence section.
 
 **Reader upgrade notes (2026)**: New features (modes, auto-scroll, zoom/filters/fullscreen, progress, drawer, keyboard) were added while keeping the exact `isUnlocked = isChapterUnlocked(...) || !isPremium`, `unlockChapter`, coin balance, panel URL handling (SmartImage), and localStorage keys untouched. All new state (zoom, mode, filters, auto, drawer, progress) lives in the page; only progress helpers went through context. Test both vertical (default) and paged, locked vs unlocked chapters, and progress restore + continue banner.

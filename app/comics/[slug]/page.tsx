@@ -125,7 +125,7 @@ export default function ComicDetailPage() {
             <motion.button
               onClick={() => shareLink(comic.slug)}
               whileTap={{ scale: 0.985 }}
-              className="btn-ghost flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm border border-[var(--border)] hover:bg-[var(--bg-elev)]"
+              className="btn-ghost flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm border border-[var(--accent)]/60 hover:bg-[var(--accent)]/10 text-[var(--accent)]"
               title="Share this comic"
             >
               <Share2 size={16} /> Share

@@ -1288,8 +1288,8 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       }
 
       const toast = document.createElement("div");
-      toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
-      toast.textContent = "Link copied to clipboard!";
+      toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-[var(--accent)] px-5 py-2 text-sm text-white shadow-lg z-[100]";
+      toast.textContent = "Link copied!";
       document.body.appendChild(toast);
       setTimeout(() => toast.remove(), 2200);
     } catch (e) {

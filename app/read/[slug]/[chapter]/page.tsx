@@ -34,9 +34,9 @@ export default function ReaderPage() {
         <div className="flex items-center gap-2">
           <span className="text-[10px]">Ch.{chNum} {chapter.isPremium ? "PREMIUM" : ""}</span>
           <button
-            onClick={() => shareLink(comic.slug, chNum)}
-            className="btn-ghost p-1 rounded flex items-center gap-1 text-xs"
-            title="Share this chapter"
+            onClick={() => shareLink(comic.slug)}
+            className="btn-ghost p-1 rounded flex items-center gap-1 text-xs border border-[var(--accent)]/50 hover:bg-[var(--accent)]/10 text-[var(--accent)]"
+            title="Share this comic"
           >
             <Share2 size={15} /> <span className="hidden sm:inline">Share</span>
           </button>
