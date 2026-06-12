@@ -466,6 +466,16 @@ export default function UploadComicPage() {
           return { ...chIn, panels: publicPanels };
         });
 
+        // Debug: verify no data: URLs remain for public publish (all should be https from Storage)
+        const samplePanel = publicChapters[0]?.panels?.[0];
+        console.log('[upload] After Storage replace - sample public panel URL (first 120 chars):', samplePanel?.substring(0, 120));
+        const stillDataUrls = publicChapters.some((ch: any) => ch.panels?.some((p: string) => p && p.startsWith('data:')));
+        if (stillDataUrls) {
+          console.error('[upload] WARNING: Some panel URLs are still data: after public conversion! This will cause blank panels for other users.');
+        } else {
+          console.log('[upload] All panels successfully converted to Supabase https URLs for public comic.');
+        }
+
         const publicInput: PublishComicInput = {
           ...baseInput,
           coverUrl: publicCover,
@@ -476,6 +486,8 @@ export default function UploadComicPage() {
         setProcessingProgress({ current: totalFiles, total: totalFiles, label: 'Saving to database...' });
 
         console.log('[upload] calling publishPublicComic with isPublic from state=', isPublic, ' (should be true)');
+        console.log('[upload] About to call publishPublicComic - sample chapter panels[0] (should be https):', publicInput.chapters[0]?.panels?.[0]?.substring(0, 100));
+
         const inserted = await publishPublicComic({
           slug: comicSlug,
           title: publicInput.title,
@@ -523,6 +535,9 @@ export default function UploadComicPage() {
           isPublic: true,
           owner_id: user?.id,
         };
+
+        // Debug: confirm the ingest object has https panels
+        console.log('[upload] normalizedPublic sample panel for ingest:', normalizedPublic.chapters[0]?.panels?.[0]?.substring(0, 100));
 
         ingestPublicComic(normalizedPublic);
         recordUploadToHistory(normalizedPublic as any);

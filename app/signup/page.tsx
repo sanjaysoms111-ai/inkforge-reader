@@ -60,16 +60,13 @@ function SignupContent() {
       return;
     }
 
-    // Success path (profile created + auto-login attempted in UserContext)
-    setSuccessMsg("Inkforge Account created successfully! Welcome!");
-    // Mark for a welcome toast in /library
-    if (typeof window !== "undefined") {
-      sessionStorage.setItem("inkforge_welcome", "1");
-    }
-    // Brief celebration message then redirect to library
-    setTimeout(() => {
-      router.push("/library");
-    }, 1600);
+    // Always show success screen (no auto-login per updated flow).
+    // Use the specific friendly message when confirmation is required.
+    const confirmationMessage = "Account created successfully! Please check your email (including spam folder) and click the confirmation link to activate your Inkforge Account.";
+    const welcomeMessage = "Inkforge Account created successfully! Welcome!";
+
+    setSuccessMsg(res.needsConfirmation ? confirmationMessage : welcomeMessage);
+    // Do not set sessionStorage or auto-redirect to /library (per email confirmation requirements)
   }
 
   async function handleGoogle() {
@@ -98,7 +95,17 @@ function SignupContent() {
         {successMsg ? (
           <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-5 text-center">
             <div className="text-lg font-semibold text-emerald-400 mb-1">{successMsg}</div>
-            <div className="text-sm text-[var(--text-muted)]">Redirecting you to your Library...</div>
+            <div className="mt-4">
+              <Link 
+                href="/login" 
+                className="inline-flex items-center justify-center rounded-xl bg-[var(--accent)] px-6 py-2 text-sm font-semibold text-white hover:brightness-110 transition"
+              >
+                Go to Login →
+              </Link>
+            </div>
+            <div className="mt-3 text-xs text-[var(--text-muted)]">
+              You can sign in after confirming your email (if required).
+            </div>
           </div>
         ) : (
           <>

@@ -287,6 +287,16 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       thumbnail: ch.thumbnail_url,
     }));
 
+    // Debug: catch if public comic still has data: panels (should never for properly published public)
+    if (row.is_public) {
+      const hasData = chapters.some((ch: any) => ch.panels?.some((p: string) => p && p.startsWith('data:')));
+      if (hasData) {
+        console.warn('[normalizeSupabaseComic] Public comic has data: panel URLs (will be blank for viewers):', row.slug);
+      } else {
+        console.log('[normalizeSupabaseComic] Public comic panels look good (https): sample', chapters[0]?.panels?.[0]?.substring(0, 80));
+      }
+    }
+
     return {
       id: row.id,
       slug: row.slug,

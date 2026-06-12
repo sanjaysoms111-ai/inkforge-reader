@@ -102,6 +102,12 @@ export async function publishPublicComic(input: PublishPublicInput) {
   }
 
   // Insert chapters (panels are already public https from prior Storage step)
+  console.log('[publishPublicComic] about to insert chapters. Sample panel[0] (must be https, not data:):', input.chapters[0]?.panels?.[0]?.substring(0, 120));
+  const hasDataUrlsInChapters = input.chapters.some((ch: any) => ch.panels?.some((p: string) => p && p.startsWith('data:')));
+  if (hasDataUrlsInChapters) {
+    console.error('[publishPublicComic] CRITICAL: Attempting to save data: URLs into public chapters table! Other users will see blank panels.');
+  }
+
   const chapterRows = input.chapters.map((ch) => ({
     comic_id: comic.id,
     number: ch.number,

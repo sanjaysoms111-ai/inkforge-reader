@@ -24,7 +24,7 @@ interface UserContextType {
   profile: Profile | null;
   loading: boolean;
   // Auth
-  signUp: (email: string, password: string, displayName?: string) => Promise<{ error?: string }>;
+  signUp: (email: string, password: string, displayName?: string) => Promise<{ error?: string; success?: boolean; needsConfirmation?: boolean }>;
   signInWithPassword: (email: string, password: string) => Promise<{ error?: string }>;
   signInWithOAuth: (provider: "google" | "github") => Promise<void>;
   signOut: () => Promise<void>;
@@ -208,7 +208,13 @@ export function UserProvider({ children }: { children: ReactNode }) {
         data: { display_name: display },
       },
     });
-    if (error) return { error: error.message };
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes("already registered") || msg.includes("user already registered")) {
+        return { error: "This email is already registered. Please sign in or use 'Forgot Password'." };
+      }
+      return { error: error.message };
+    }
 
     const uid = signUpData.user?.id;
     if (!uid) return { error: "Signup succeeded but no user id returned." };
@@ -228,28 +234,13 @@ export function UserProvider({ children }: { children: ReactNode }) {
         .select()
         .single();
     } catch (e) {
-      // Table may not exist yet or RLS; load will handle fallback
+      // Table may not exist yet or RLS; will be handled on first login
       console.warn("[UserContext] profile upsert on signup failed (will retry on login)", e);
     }
 
-    // Auto-login the user immediately if possible (works when email confirmation is not required)
-    if (signUpData.session) {
-      // Supabase already established a session
-      await loadProfileAndLocal(uid);
-      return { success: true };
-    }
-
-    // Fallback: explicitly sign in with the just-created credentials
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-    if (signInError) {
-      // Most common case: email confirmation is required in the Supabase project settings
-      return { error: "Account created! Please check your email for a confirmation link, then sign in." };
-    }
-
-    // Successfully signed in
-    await loadProfileAndLocal(uid);
-    return { success: true };
-  }, [supabase, loadProfileAndLocal]);
+    const needsConfirmation = !signUpData.session;
+    return { success: true, needsConfirmation };
+  }, [supabase]);
 
   const signInWithPassword = useCallback(async (email: string, password: string) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password });

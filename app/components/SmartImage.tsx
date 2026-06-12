@@ -30,6 +30,7 @@ export function SmartImage({
   onLoad,
 }: SmartImageProps) {
   const [loaded, setLoaded] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const isRemote = src.startsWith("http://") || src.startsWith("https://");
   const isData = src.startsWith("data:");
 
@@ -38,7 +39,16 @@ export function SmartImage({
     onLoad?.();
   };
 
-  if (isRemote && !isData) {
+  const handleError = () => {
+    setHasError(true);
+    console.error('[SmartImage] Failed to load src:', src?.substring(0, 120));
+  };
+
+  if (isRemote) {
+    console.log('[SmartImage] rendering remote (Supabase https expected):', src?.substring(0, 100));
+  }
+
+  if (isRemote && !isData && !hasError) {
     // Use Next Image for optimization (blur placeholder possible in future)
     return (
       <div className={`relative overflow-hidden ${className}`}>
@@ -51,11 +61,25 @@ export function SmartImage({
           priority={priority}
           loading={loading}
           onLoad={handleLoad}
+          onError={handleError}
           unoptimized={false} // allow optimization + caching
         />
-        {!loaded && (
+        {!loaded && !hasError && (
           <div className="absolute inset-0 bg-[var(--bg-elev)] animate-pulse" />
         )}
+        {hasError && (
+          <div className="absolute inset-0 flex items-center justify-center bg-red-900/20 text-xs text-red-400">
+            Failed to load image
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (hasError) {
+    return (
+      <div className={`relative overflow-hidden flex items-center justify-center bg-red-900/20 text-xs text-red-400 ${className}`}>
+        Failed to load image
       </div>
     );
   }
@@ -69,8 +93,9 @@ export function SmartImage({
         className={`block w-full h-auto transition-opacity duration-200 ${loaded ? "opacity-100" : "opacity-0"}`}
         loading={loading}
         onLoad={handleLoad}
+        onError={handleError}
       />
-      {!loaded && (
+      {!loaded && !hasError && (
         <div className="absolute inset-0 bg-[var(--bg-elev)] animate-pulse" />
       )}
     </div>

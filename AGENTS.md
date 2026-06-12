@@ -664,13 +664,15 @@ This completes the public comics + chapters sharing story (comics public + chapt
 - Google sign-up kept clearly secondary with label "or continue with Google".
 - `signUp` in UserContext enhanced:
   - Explicit profile upsert (display_name + 50 starter coins) right on signup.
-  - Auto-login attempt (immediate session if no email confirmation required in Supabase project, or explicit signInWithPassword fallback).
-  - Better structured success / error returns.
-- Post-signup flow:
-  - Shows exact success banner: "Inkforge Account created successfully! Welcome!"
-  - Auto-redirects to /library (user is logged in and profile exists).
-- Professional, ownable "Inkforge Account" feel (not generic "sign up").
-- Error handling, busy states, and graceful fallback for email confirmation projects all preserved.
+  - Returns `{ success, needsConfirmation }` (or error) so the UI can branch correctly.
+  - Improved duplicate email error: "This email is already registered. Please sign in or use 'Forgot Password'."
+- Email confirmation flow (when enabled in Supabase):
+  - No auto-login.
+  - Shows clean success screen with the exact friendly message: "Account created successfully! Please check your email (including spam folder) and click the confirmation link to activate your Inkforge Account."
+  - Prominent "Go to Login →" button (no automatic redirect to /library or sessionStorage welcome flag).
+- When no confirmation required: still shows success + Go to Login (consistent "no auto-login after signup" behavior).
+- Success UI uses the same emerald glass card styling as the rest of the Inkforge Account pages.
+- Error handling for real errors preserved; busy state on the primary CTA.
 - `npm run build` verified clean.
 - AGENTS.md updated.
 
@@ -739,7 +741,25 @@ This completes the core "Inkforge Account" auth experience (signup + login + for
 
 The /profile page completes the Inkforge Account experience: sign up → login → forgot password → profile management → library.
 
-**Strict author-only edit and delete (this request)**:
+**Public comic panels not showing (blank/placeholder) fix (this request)**:
+- Root cause: In some publish paths for Public, panel URLs in the chapters sent to DB (and immediate ingest) could fall back to original data: URLs instead of the https from Storage (due to key mismatch or partial map). SmartImage would either not trigger load (staying on skeleton) or the reader stub didn't render panels at all. For other accounts, joined chapters(*) might return data: or no panels if conversion failed.
+- Fixes implemented:
+  - In upload/page.tsx (main Public path): after urlMap replacement into publicChapters/publicPanels, added explicit debug console.log of sample panel URL + check/warn if any still start with 'data:'. Similar logs before calling publishPublicComic and on the normalized ingest object. This verifies https conversion.
+  - In creator/page.tsx public migration: the replacement logic already attempted urlMap || original (good for mixed https/data:), logs added via the action.
+  - In publishPublicComic server action: before chapterRows insert, added console.log of sample input.chapters panels + error log if any data: detected for a public comic. Ensures what reaches the chapters table.
+  - In ComicsContext normalizeSupabaseComic: when row.is_public, added console.log of sample https panel or warn if data: panels detected on public comic (helps debug fetch side).
+  - Updated the reader page (which was a stub showing only placeholder text): replaced the placeholder with actual vertical rendering of chapter.panels using <SmartImage> for each. This makes public https panels visible in the reader (matching the "full reader" described in AGENTS). Now you can actually see the panels for testing.
+  - Improved SmartImage: added hasError state + onError handlers for both <Image> (remote) and <img> (fallback). On error, shows a "Failed to load image" fallback box instead of infinite skeleton or broken image. Added console.log for every remote (https Supabase) load attempt. Better skeleton only while !loaded && !hasError.
+  - The storage prepare/upload + client-side replacement in upload/creator flows already do the data: -> https conversion before passing to the action/DB. Logs now make it verifiable that no data: leak into public chapters.
+- No change to RLS (previous chapters_select_public policy allows non-owners to read chapters for is_public=true parents).
+- Debug: open dev console when publishing Public and when viewing as another account; you will see the https sample URLs logged on publish, on normalize, and SmartImage remote loads.
+- Test per request: As account A, publish via /upload with Public toggle (use small images). As account B (different login), go to /library Discover or search the title, click the comic, open reader for a chapter. Panels should render (not blank). Check console for https logs and no "still data:" warnings. If fallback "Failed to load" appears, the Storage URL or bucket policy may need check (but logs will show the exact URL attempted).
+- `npm run build` clean.
+- AGENTS.md updated with this fix section + test steps.
+
+This ensures public comics truly deliver https panels to all viewers, with the reader able to display them.
+
+**Full Profile Page (/profile) (this request)**:
 - Goals achieved: Only the comic owner can see/use Edit/Delete buttons (non-owners see nothing). Backend protected by existing RLS (UPDATE/DELETE `owner_id = auth.uid()` on comics + chapters).
 - Added `owner_id?: string` to Comic type (additive).
 - Updated `normalizeSupabaseComic` to preserve `owner_id` from Supabase rows.

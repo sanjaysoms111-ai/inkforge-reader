@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ArrowLeft, List, X, Share2 } from "lucide-react";
 import { useComics } from "../../../lib/ComicsContext";
 import { useUser } from "../../../lib/UserContext";
+import { SmartImage } from "../../../components/SmartImage";
 
 export default function ReaderPage() {
   const params = useParams<{ slug: string; chapter: string }>();
@@ -57,10 +58,27 @@ export default function ReaderPage() {
           Public comics + Supabase Storage upload supported. Panels served as https. First chapter always free. Premium gating via UserContext (first chapter free).
         </div>
 
-        <div className="p-10 border border-[var(--border)] rounded text-center text-sm">
-          (Panels render here via SmartImage — data: or https from Storage. Full virtualization, zoom, auto-scroll, download, comments in the complete reader.)
-          <div className="mt-3 text-[10px] text-[var(--text-muted)]">Current chapter unlocked: {isUnlocked ? "YES" : "LOCKED (use drawer or coins)"}</div>
+        {/* Actual panel rendering for public (https) and private (data:) comics via SmartImage */}
+        <div className="max-w-[720px] mx-auto">
+          {chapter.panels && chapter.panels.length > 0 ? (
+            chapter.panels.map((panelUrl: string, idx: number) => (
+              <div key={idx} className="mb-3 flex justify-center">
+                <SmartImage
+                  src={panelUrl}
+                  alt={`Panel ${idx + 1} of Ch.${chNum}`}
+                  className="max-w-full w-auto max-h-[82vh] rounded-lg shadow border border-[var(--border)]"
+                  loading="lazy"
+                />
+              </div>
+            ))
+          ) : (
+            <div className="text-center text-[var(--text-muted)] p-8 border border-[var(--border)] rounded">
+              No panels found for this chapter.
+            </div>
+          )}
         </div>
+
+        <div className="mt-3 text-[10px] text-[var(--text-muted)] text-center">Current chapter unlocked: {isUnlocked ? "YES" : "LOCKED (use drawer or coins)"}</div>
 
         <div className="mt-6 flex justify-center gap-2">
           <button onClick={() => router.push(`/read/${comic.slug}/${chNum-1}`)} disabled={!comic.chapters.find(c=>c.number===chNum-1)} className="btn-ghost px-4 py-1">Prev</button>
