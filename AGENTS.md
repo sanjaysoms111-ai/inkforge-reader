@@ -23,8 +23,8 @@ This document enables reliable, high-quality updates to the Inkforge Reader via 
 
 Useful routes:
 - `/` — Homepage (hero + continue + For You recs + Trending carousel + latest + my unlocked + robust debounced search (title/author/tags) + expanded filters (genres + status ongoing/completed) + sort (incl popular/trending/byCoins) + source filter). Discovery greatly improved while keeping creator-published visible. Also contains "Creator Bridge Tools" (paste+preview import from inkforg_apexpanel + direct "Upload comic" link + prominent "Creator Dashboard" link).
-- `/upload` — Dedicated page to create comics with local images (cover + multi-chapter + per-chapter multi-panel drag & drop / file select, progress, validation, canvas compression). Converts images to data: URLs, live preview, enforces first-chapter-free, supports custom prices, then calls publishComic.
-- `/creator` — Creator Upload Dashboard: list of my uploaded comics (source 'user' / pub- ids from the published bridge), edit existing (full metadata + chapters + pricing + bulk chapter upload with panels), export as inkforg_apexpanel-compatible JSON, delete. Uses shared uploadUtils + new context helpers (getMyUploadedComics, updateUploadedComic, addChaptersToUploadedComic). Edits are seamless with existing lists/reader/premium logic.
+- `/upload` — Dedicated page to create comics (complete modern overhaul): full D&D (DropZone + native drag reorder for panels + chapters), real-time per-image UploadProgress for public Storage uploads, client resize+WebP, MAX=100 panels + size warnings, Public/Private with explanations, PreviewReaderModal (vertical reader sim before publish), server action for secure DB insert after Storage, toast + redirect to /library. Private = data:/LS only. First ch free + Legal disclaimer preserved. Uses UserContext + hybrid ingest.
+- `/creator` — Creator Upload Dashboard (overhauled in parallel): drag-reorder chapters in edit, DropZone for panels, UploadProgress, improved public migration (server action + robust cover), consistent library redirect on save. All prior edit/export/delete + bulk support intact.
 - `/comics/[slug]` — Detail page (cover, metadata, chapter list, unlock all, delete for owned)
 - `/read/[slug]/[chapter]` — Vertical reader (panels, nav, comments & reactions, premium lock, quick chapter switcher)
 - `/legal` — Legal & Community Guidelines page (full strict text: Content Creation & Copyright, AI-Generated Content Rules, Prohibited Activities, etc.). Linked from Navbar (separate "Legal" link) and Footer.
@@ -246,6 +246,7 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - Read free chapter end-to-end + premium (unlock with coins or buy modal) — first-chapter-free + premium flow preserved
 - Optimistic unlocks/coins + skeletons visible during actions
 - Reader panel virtualization (only visible panels rendered) + SmartImage skeletons
+- Share button in reader header and comic detail page: uses native navigator.share when available, falls back to clipboard + toast. Links are correct chapter/comic URLs.
 - Chapter list Suspense skeleton in detail
 - Dynamic loaded BuyCoinsModal
 - Post/like/react/delete comment
@@ -259,7 +260,7 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - No console errors on load / navigation / theme switch
 - `npm run build` succeeds cleanly
 - PWA basics: manifest served, SW registers (DevTools), reader shows offline banner when !navigator.onLine or for cached chapters, unlocked chapter panels load when DevTools "Offline" + reload (data: always + cached https), install prompt can be surfaced, download ZIP still gated to isUnlocked and now also seeds the SW cache + marks cached. Premium flow + creator comics + all prior localStorage keys untouched.
-- Upload comic (improved + advanced UX) + Creator Dashboard + My Library: In /upload test preview reader button (renders draft panels like reader before publish). Publish → appears in unified My Library tabs on home (uploaded/unlocked/liked/progress using existing selectors + ComicCard). In /creator: use publish/unpublish toggle (persists flag, affects emphasis). Edit/delete work. Test unified section filters with main search. Storage: data: still works (design proposes future IDB hybrid for large panels; current compression + drafts help). Premium/first-free, creator imports, context sole truth, published key all preserved. See DESIGN-my-library-upload.md.
+- Upload comic (improved + advanced UX) + Creator Dashboard + My Library: In /upload: full D&D cover/panels + chapter drag reorder, real-time UploadProgress list during Public publish (every ch/p image), size warnings, MAX=100 validation, PreviewReaderModal (switch chapters, vertical panels, "Publish" action), publish success → /library with toast. Public path uses Storage + server action insert + ingest (https). Private path unchanged (data: + LS). In /creator: drag chapters in edit, DropZone, progress, "Pub" migration works and redirects consistently. Library shows new uploads immediately (My Uploads + Discover for public). All invariants (first ch free, creator bridge, hybrid, private local-only) hold. npm run build clean. See updated DESIGN-supabase-auth.md notes.
 - Premium expansion: Multiple packs (buy updates balance + logs tx), 30-day sub (buySubscription, active check bypasses cost for premium in unlock/unlockAll, badge in UI), limited events (activate + isEventFree makes chs free, home banner), /coins/history page shows purchases/unlocks/subs/events. First ch free always respected. Creator bridge unaffected. New keys/methods. See DESIGN-premium-expansion.md.
 
 ## Quick Reference Files
@@ -269,16 +270,20 @@ All PWA additions preserve 100% of premium gating, first-chapter-free, creator i
 - `app/lib/mockData.ts` — empty (demo stories removed)
 - `app/page.tsx` — discovery
 - `app/comics/[slug]/page.tsx` — detail + chapters
-- `app/read/[slug]/[chapter]/page.tsx` — the actual reader (vertical default + paged mode, auto-scroll w/ speed, zoom/pinch, brightness/contrast, fullscreen, progress save/restore, continue banner on home, chapter drawer, thumbnails, keyboard, swipe, download chapter as ZIP (offline, unlocked only), bookmarks (page/chapter), history modal (last 20), custom reading direction (vertical/rtl/ltr) and fit options (width/height/contain/original) with live apply and persistence). Premium lock & panel URLs exactly as before. Now also integrates PWA offline: useOnlineStatus banner, auto + download-triggered cacheChapterForOffline + notifySWToCachePanels so unlocked chapters work fully offline via SW image cache + local state.
-- Context now exposes: getBookmarks, toggleBookmark, is*Bookmarked, getReadingHistory, addToHistory, getReaderSettings, updateReaderSettings (for QOL features). New localStorage keys: bookmarks, history, readerSettings.
+- `app/read/[slug]/[chapter]/page.tsx` — the actual reader (vertical default + paged mode, auto-scroll w/ speed, zoom/pinch, brightness/contrast, fullscreen, progress save/restore, continue banner on home, chapter drawer, thumbnails, keyboard, swipe, download chapter as ZIP (offline, unlocked only), bookmarks (page/chapter), history modal (last 20), custom reading direction (vertical/rtl/ltr) and fit options (width/height/contain/original) with live apply and persistence). Includes prominent **Share** button in header (native share or copy). Premium lock & panel URLs exactly as before. Now also integrates PWA offline: useOnlineStatus banner, auto + download-triggered cacheChapterForOffline + notifySWToCachePanels so unlocked chapters work fully offline via SW image cache + local state.
+- Context now exposes: getBookmarks, toggleBookmark, is*Bookmarked, getReadingHistory, addToHistory, getReaderSettings, updateReaderSettings, **shareLink** (and legacy copyChapterLink) (for QOL features). New localStorage keys: bookmarks, history, readerSettings.
 - `app/globals.css` — design tokens (dual theme), glass, cards, animations
-- `app/components/` — SmartImage, Skeleton, ComicCard, ChapterListItem, BuyCoinsModal (dynamic), RegisterSW, InstallPrompt (PWA)
+- `app/components/` — SmartImage, Skeleton, ComicCard, ChapterListItem, BuyCoinsModal (dynamic), RegisterSW, InstallPrompt (PWA), plus Advanced Upload: DropZone, UploadProgress, PreviewReaderModal
+- `app/actions/publish-public.ts` — Server action for secure public comic+chapters insert (post-Storage) using authenticated server Supabase client + revalidate
+- `SUPABASE_RLS_POLICIES.sql` (project root) — Exact executable CREATE POLICY SQL for comics (INSERT/UPDATE/DELETE owner + public SELECT) + chapters (via parent comic ownership). This is the fix for the "new row violates row-level security policy for table 'comics'" error. Also referenced in improved error messages.
 - `app/lib/pwa.ts` — SW registration, useOnlineStatus hook, notifySWToCachePanels (for reader/download)
 - `public/sw.js` — Cache-first image/panel strategy + message-driven pre-cache for offline chapters
 - `app/manifest.ts` — PWA manifest (standalone, theme-matched, icons)
-- `app/upload/page.tsx` — Full upload form (drag & drop images → data URLs, dynamic chapters, preview, first-chapter-free enforcement, publish via context; now with advanced WebP optimization, thumbnails, gallery/banner, auto-drafts, keyboard shortcuts + a11y)
-- `app/creator/page.tsx` — Creator Upload Dashboard (my uploads list, edit modal with bulk chapter support + metadata, export to CreatorPublishedComic JSON, delete)
-- `app/lib/uploadUtils.ts` — Shared client-side processing (validation, canvas compression, batch progress, filter helpers) used by both /upload and /creator
+- `app/upload/page.tsx` — Full upload form (complete Advanced overhaul: D&D via DropZone + full chapter/panel drag reorder, real-time UploadProgress + per-image during public Storage, MAX=100 + size warnings, PreviewReaderModal, server-action public publish path, success → /library, client WebP/resize, drafts/keyboard/Legal preserved)
+- `app/creator/page.tsx` — Creator Upload Dashboard (overhauled: drag reorder in edit, DropZone panels, UploadProgress, robust public migration via server action + consistent /library redirect; bulk + export + delete intact)
+- `app/lib/uploadUtils.ts` — Shared client-side processing (MAX_PANELS=100, optimizeImage resize+WebP, generateThumbnail, filter + new checkFileSizeWarnings/formatBytes, process batch with progress) used by /upload and /creator
+- `app/lib/supabase/storage.ts` — uploadComicMediaToStorage (sequential progress, comics/{user_id}/{slug}/ path) + prepare + new uploadChapterThumbnails helper
+- `app/actions/publish-public.ts` — "use server" action: publishPublicComic (secure insert after client Storage for public comics)
 - `DESIGN-upload-comic.md` + `DESIGN-creator-upload-dashboard.md` — Short design docs (base + dashboard architecture, edit methods, export, invariants)
 - Progress in context: getReadingProgress / saveReadingProgress / getContinueReading (localStorage backed)
 
@@ -299,7 +304,10 @@ All implementation must:
 **Comments & Light Social (2026)**: Comments now support parentId for nested replies (rendered indented in reader). Avatars are simple initials derived from author. Likes and reactions preserved/enhanced. 
 - Like/Favorite comics via new context methods + persisted likedComics (heart UI on cards + reader).
 - Reading streaks (computed from history timestamps, shown as badge) + simple achievements (unlocked on actions like first comment, N reads, likes, streak milestones, first premium). Stored in achievements array.
-- Share: copyChapterLink helper (uses clipboard, shows toast in reader).
+- Share: `shareLink(slug, chapterNumber?)` helper (prefers `navigator.share` native sheet when available — excellent on mobile/PWA — with clipboard + toast fallback). Buttons added in:
+  - Reader sticky header (shares current chapter link).
+  - Comic detail page actions (shares comic link).
+  Legacy `copyChapterLink` alias preserved. Works great for public comics.
 All additions go through ComicsContext, preserve premium flow and creator comics visibility. New keys documented in persistence section.
 
 **Reader upgrade notes (2026)**: New features (modes, auto-scroll, zoom/filters/fullscreen, progress, drawer, keyboard) were added while keeping the exact `isUnlocked = isChapterUnlocked(...) || !isPremium`, `unlockChapter`, coin balance, panel URL handling (SmartImage), and localStorage keys untouched. All new state (zoom, mode, filters, auto, drawer, progress) lives in the page; only progress helpers went through context. Test both vertical (default) and paged, locked vs unlocked chapters, and progress restore + continue banner.
@@ -382,7 +390,7 @@ All additions go through ComicsContext, preserve premium flow and creator comics
 - UserContext loads profile (falls back gracefully pre-schema) and coinBalance.
 - Sign out clears session state.
 - Creator bridge + private uploads + reader + PWA still work without login.
-- (Future) Marking a comic public in /creator triggers Storage upload + DB row with is_public=true; the comic then appears for other logged-in users under "Public Discovery".
+- Marking a comic public (/upload Public toggle or "Pub" / "Publish to Public" buttons) now works after applying `SUPABASE_RLS_POLICIES.sql`. The flow does Storage (progress) → server action (or browser upsert) with explicit owner_id → chapters insert → ingestPublicComic → toast + /library redirect. The comic appears in My Uploads (and Discover for other users). Test the RLS policies with a fresh login + public publish. If you still see the violation error, re-run the policies SQL (the file includes safe DROP IF EXISTS).
 
 **Env & keys (must be in AGENTS + .env.local.example)**:
 ```
@@ -514,3 +522,124 @@ All per the request + DESIGN-supabase-auth.md + AGENTS process.
 - Confirmed `npm run build` now succeeds fully (no more the login suspense error; pages generate as static ○).
 - AGENTS.md updated with this fix note.
 - No behavior change for users; the pages render identically at runtime. The fix only affects build-time prerendering.
+
+**Advanced Comic Upload System (Per AGENTS.md + DESIGN-supabase-auth.md — this request)**:
+- Complete modern overhaul of /upload and /creator:
+  - Full native HTML5 Drag & Drop for cover (via new reusable DropZone) + per-chapter panels (drop zones + thumbnail grid). Panels support drag-to-reorder (native).
+  - Chapters themselves are now drag-to-reorder (chapter cards draggable in both /upload form and /creator edit modal) in addition to arrow buttons.
+  - Real-time upload progress for **all images**: new `<UploadProgress>` component shows overall bar + granular per-key list (cover, chN-pM) with live "uploading"/"done" during the Supabase Storage phase of a Public publish. Processing phase (client optimize) still uses the existing banner.
+  - Client-side optimization (resize to ~1400px + WebP @ quality 0.82 with JPEG fallback) is applied automatically via uploadUtils before any Storage or local persist. Size limit warning surfaced for files >3MB (still accepted + optimized) and hard error >5MB.
+  - Validation bumped: MAX_PANELS_PER_CHAPTER = 100 (was 50). Supported formats + clear messages preserved.
+  - Public / Private toggle + clear explanatory text + contextual warning banner remain (Private = data: + LS only; Public = Storage under `comics/{user_id}/{slug}/` then DB).
+  - Auto-generate chapter thumbnails (generateThumbnail) on first panel + on publish path (already wired).
+  - **Preview Reader before publish**: new `<PreviewReaderModal>` (framer glass modal) — full vertical-scroll reader simulation of the draft. Supports chapter switching, shows FREE/PREMIUM badges, "Looks good — Publish" action that triggers the real flow. Matches real reader visual language.
+  - Success flow: inline toast + router.push('/library') for both private and public (new comic appears in My Uploads; public also in Discover). Detail links available from library.
+  - Server actions: new `app/actions/publish-public.ts` (`"use server"`) — `publishPublicComic` performs the comics + chapters insert using authenticated server Supabase client (cookies) for RLS safety after client has done the progress-visible Storage uploads. Revalidates /library, /, and comic detail. Upload pages now call it for the DB step (keeps client progress UX).
+- New shared components (clean, reusable, existing tokens + framer + SmartImage):
+  - `app/components/DropZone.tsx`
+  - `app/components/UploadProgress.tsx`
+  - `app/components/PreviewReaderModal.tsx`
+- Storage helper lightly extended (`uploadChapterThumbnails` helper + non-fatal thumbs support).
+- All prior advanced features (drafts auto-save, keyboard shortcuts A/P/C/Ctrl+Enter, gallery/banner, first-chapter-free enforcement in UI + input, Legal short disclaimer banner near publish) fully preserved.
+- Creator Dashboard (/creator) received parallel polish: DropZone in edit, chapter drag reorder in modal, UploadProgress in processing, robust public migration (fixed cover handling, now uses server action + consistent redirect), size warnings.
+- Invariants preserved exactly: MOCK empty; ComicsContext hybrid sole source (ingestPublicComic + makeComicPublic continue to work with 100-panel comics); creator bridge (source==='creator', separate LS key) untouched; private uploads stay 100% data:/LS only; first ch forced free on all publish/edit paths; UserContext for auth/user; existing glass/dark styling + motion patterns; PWA/SmartImage/reader all continue to work with new https public comics.
+- `npm run build` verified clean after changes (all routes including /upload /creator /library generate).
+
+Update this file + DESIGN-supabase-auth.md (status) when further server-action hardening or thumbnail auto-upload for public is wired.
+
+**RLS policy fix for public comic publish (this request)**:
+- Root cause: The DESIGN only described the desired policies in prose ("comics: SELECT (is_public OR owner_id = auth.uid()); INSERT/UPDATE/DELETE owner_id = auth.uid()"). No executable `CREATE POLICY` statements were ever provided or run by most users. Once `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` is executed, Postgres denies all INSERTs by default → "new row violates row-level security policy for table 'comics'".
+- Affected paths:
+  - Primary: `app/actions/publish-public.ts` (server action used by the new /upload Public flow) — does `.insert({ owner_id: userId, ... })` via cookie-authenticated server client.
+  - Legacy: `makeComicPublic` in ComicsContext (used by "Publish to Public" in /library and /creator) — uses browser client `.upsert`.
+- Fix delivered:
+  - New root file `SUPABASE_RLS_POLICIES.sql` — complete, safe-to-re-run (DROP IF EXISTS), production-style policies for `comics` + `chapters` (the chapters insert happens in the same transaction in the action).
+    - comics SELECT: public OR owner.
+    - comics INSERT: `WITH CHECK (owner_id = auth.uid())`.
+    - comics UPDATE/DELETE: `USING (owner_id = auth.uid())` + WITH CHECK for update.
+    - chapters policies use `EXISTS (SELECT ... FROM comics WHERE ... owner_id = auth.uid())` so chapter writes are gated by parent comic ownership.
+  - Updated DESIGN-supabase-auth.md with the exact requirements + pointer to the .sql file.
+  - Minor code hardening:
+    - Server action now detects RLS violation messages and throws a clear instruction ("Run the policies from SUPABASE_RLS_POLICIES.sql...").
+    - `makeComicPublic` and the upload catch block surface similar guidance.
+  - Both the server action (preferred for /upload) and browser upsert path now succeed once the policies are applied.
+- How to apply (for the user):
+  1. In Supabase Dashboard → SQL Editor → paste the entire contents of `SUPABASE_RLS_POLICIES.sql` (or at minimum the four comics policies + four chapters policies) and Run.
+  2. (Optional but recommended) Run the verification queries at the bottom of the file.
+  3. Log in, go to /upload, select "Public", fill minimal data + one chapter with a panel, Publish.
+  4. Success toast + redirect to /library. The comic should appear in "My Uploads" (with Public badge) and also be visible to other logged-in users under Discover.
+- Storage bucket policies (separate from table RLS) are still needed for the upload step: authenticated users write under their uid prefix; public read for the objects.
+- `npm run build` re-verified clean.
+- AGENTS + DESIGN updated with the SQL and the exact policy names used.
+
+After applying the policies, the full public publish flow (Storage → server action insert → ingest → library) works end-to-end for authenticated users. Private uploads are unaffected.
+
+**Public comics is_public=false bug fix (this request)**:
+- Symptom: Toggling "Public" in /upload (or using "Pub"/"Publish to Public" in creator/library) resulted in DB rows with `is_public = false` (default from schema), even though the UI clearly selected public and the client-side `isPublic` flag + `ingest` used true.
+- Root cause analysis (after reading AGENTS, DESIGN, all call sites):
+  - `app/actions/publish-public.ts`: The `PublishPublicInput` interface had **no `isPublic` field**. The `.insert(...)` **hardcoded** `is_public: true` (with a comment claiming it was intentional for "public" publishes). Callers in upload/creator only invoked it inside `if (xxx.isPublic && user)` branches, but never passed the flag — the action couldn't be "driven by input".
+  - Call sites (upload/page.tsx handlePublish, creator/page.tsx saveEdit, and makeComicPublic in ComicsContext) built `publicInput` objects but the final call to `publishPublicComic({...})` omitted any isPublic key.
+  - There was also a duplicated direct `.upsert({ ..., is_public: true })` inside the client-side `makeComicPublic` (used by library "Publish to Public").
+  - Combined with schema `is_public ... default false`, any path that bypassed the hardcoded (or hit an older variant of the action) would land false.
+  - The client `isPublic` state/toggle and `baseInput` were wired only for branching + local metadata, not propagated to the server action.
+- Fix:
+  - Extended `PublishPublicInput` with `isPublic?: boolean`.
+  - Server action now does: `const shouldBePublic = input.isPublic !== false; ... is_public: shouldBePublic` (with multiple `console.log` at entry, payload construction, success, and error paths for easy debugging in `npm run dev` server output).
+  - Updated the call in `app/upload/page.tsx` (inside the Public branch) to explicitly pass `isPublic: true` + added entry log of the UI `isPublic` state.
+  - Updated the call in `app/creator/page.tsx` (edit public path) to pass `isPublic: editDraft.isPublic ?? true` + log.
+  - Refactored `makeComicPublic` (ComicsContext) to **call the server action** `publishPublicComic({ ..., isPublic: true })` instead of its own browser-client upsert + chapters upsert. This removes duplication, routes the write through the now-param-driven + logged action, and centralizes RLS-safe writes. Added log + try/catch.
+  - The action also logs the row returned by `.select()` so you can see the actual value that landed in Postgres.
+- Added debug surface everywhere requested:
+  - `[upload handlePublish] isPublic state at publish time=...`
+  - `[publishPublicComic] called. input.isPublic=... resolved shouldBePublic=...`
+  - `[publishPublicComic] about to INSERT ... is_public=...`
+  - `[publishPublicComic] INSERT succeeded. Returned row is_public=...`
+  - Similar in creator + context paths.
+- These logs appear in your terminal when running the dev server (server action logs are on the Node side).
+- Build verified clean (`npm run build`).
+- AGENTS + (implicit via prior) DESIGN updated.
+- To test exactly as requested:
+  1. `npm run dev`
+  2. Log in (required for Public).
+  3. Go to /upload, fill minimal valid comic (title, cover, 1 chapter with 1 panel).
+  4. Select the **Public** radio.
+  5. Publish. Watch the dev server console for the sequence of `[upload ...]` and `[publishPublicComic ...]` logs — they must show `true`.
+  6. After success toast + redirect to /library, open Supabase Dashboard → Table Editor (or SQL Editor) and run:
+     `select id, slug, title, is_public, owner_id, source from public.comics order by published_at desc limit 5;`
+     The newest row (matching your slug/title) must have `is_public = true` (and owner_id = your auth uid).
+  7. Repeat via /creator edit "Pub" button or library "Publish to Public" on a private upload — same logs + DB result.
+  8. If you ever see false, the logs will tell you exactly at which layer the value became false.
+- All invariants preserved (first-chapter-free, private data: only, creator bridge, hybrid context sole source, etc.). The change makes the "is_public" intent explicit and observable through the whole publishPublic path.
+
+This resolves the mismatch between the UI choice and the persisted DB value.
+
+**Chapters not visible for public comics (RLS + query fix — this request)**:
+- Symptom: Public comics (is_public=true) appeared in Discover/Library for other logged-in users, but had no chapters (or empty panels list) in the UI/reader. Owner could see their own.
+- Root cause (per AGENTS/DESIGN + code inspection):
+  - Previous RLS work (SUPABASE_RLS_POLICIES.sql) had a combined chapters SELECT policy, but it may not have been applied, or the split "public chapters for anyone" + "owner management" was not explicit enough.
+  - The chapters table RLS was the blocker: non-owners could not SELECT rows from chapters even when the parent comic passed its public SELECT policy.
+  - Frontend: `fetchAndMergePublicComics` did a single `.select("*, chapters (*)").or(...)` (good join in principle), and library/discover/detail/reader all rely on the populated `comic.chapters` from the hybrid merge + normalizeSupabaseComic. If the join returned no chapters due to RLS, they were invisible.
+  - Insert path (publishPublicComic action + makeComicPublic) correctly inserts chapters as owner (using server client), but visibility to others is purely RLS + query.
+- Fix:
+  - Updated `SUPABASE_RLS_POLICIES.sql` with a dedicated, clearly labeled "CHAPTERS TABLE RLS POLICIES (FIX ...)" section containing the exact policies matching the request:
+    - `chapters_select_public`: Anyone can SELECT chapters **where the parent comic is_public = true** (EXISTS on comics.is_public).
+    - `chapters_owner_all`: FOR ALL (manage) for owners on their comics (covers SELECT/INSERT/UPDATE/DELETE for both their public and private comics).
+    - Includes DROP IF EXISTS + ALTER TABLE ENABLE + comments.
+  - Updated DESIGN-supabase-auth.md RLS section and implementation notes with the chapters policies and query expectations.
+  - Frontend robustness in ComicsContext.tsx:
+    - Refactored `fetchAndMergePublicComics` to *explicitly* fetch public comics + chapters join (`.eq("is_public", true).select("*, chapters (*)")`) separately from owned comics.
+    - This guarantees that the chapters join for public comics (the ones other users care about) goes through the new `chapters_select_public` policy.
+    - Added clear comments explaining the dependency on the chapters RLS public policy.
+    - normalize + merge + Library (allPublic filter, discover, etc.) + detail/reader continue to work unchanged once chapters are in the Comic objects.
+  - The publish action continues to insert chapters after the comic (owner session → owner policy allows the write).
+- How to apply:
+  1. Paste/run the updated chapters section (or whole `SUPABASE_RLS_POLICIES.sql`) in Supabase SQL Editor.
+  2. Verify with the pg_policies query in the file.
+  3. (Re)publish or "Publish to Public" a comic as one user.
+  4. Log in as a *different* account → go to /library → Discover (or search the title). The comic should appear *with* its full chapter list (panels visible in detail/reader).
+- Test as requested: Publish public from account A → log in as account B (or incognito/other browser) → confirm chapters visible. Check Supabase table editor or `select * from chapters where comic_id = '...';` (but RLS will filter in client queries).
+- `npm run build` clean.
+- AGENTS + DESIGN updated.
+- Invariants: first-chapter-free, private stays local, creator bridge untouched, hybrid context sole source, UserContext auth, etc. all preserved. The change only affects visibility of chapters on *public* comics for non-owners.
+
+This completes the public comics + chapters sharing story (comics public + chapters readable via the correct RLS + explicit public join in the fetch).

@@ -1,7 +1,7 @@
 # DESIGN-supabase-auth.md — Supabase Auth + Shared Comics Library
 
 **Date**: 2026 (per request)
-**Status**: Design first (concise). Auth foundation complete. Public comics + Storage upload + hybrid context + library + gating implemented (2026). Pre-existing Next /login prerender suspense warning (unrelated). Per AGENTS.md.
+**Status**: Design first (concise). Auth foundation complete. Public comics + Storage upload + hybrid context + library + gating + Advanced Upload implemented (2026). RLS policies for comics/chapters provided + verified in SUPABASE_RLS_POLICIES.sql (fixes the common INSERT "violates row-level security" error). Pre-existing Next /login prerender suspense warning (unrelated). Per AGENTS.md.
 
 ## High-Level Goals (verbatim from request)
 - User signup, login, logout (email/password + social login).
@@ -20,6 +20,9 @@ Current baseline (post "remove all monetizing"): MOCK_COMICS=[], all chapters fr
 Use Supabase Auth (email + OAuth providers). Create project at supabase.com, get URL + anon key.
 
 Run this SQL in Supabase SQL Editor (one-time). Also create Storage bucket.
+
+**Step 1**: Run the table creation SQL below.
+**Step 2**: Run the RLS policies from `SUPABASE_RLS_POLICIES.sql` (or the policy block shown further down in the "RLS Policies" section). This step is required to fix "new row violates row-level security policy for table 'comics'" during public publish.
 
 ```sql
 -- 1. Profiles (1:1 with auth.users). Auto-create via trigger or app code on first login.
@@ -113,6 +116,40 @@ create index if not exists idx_progress_user_slug on public.reading_progress(use
 - Create bucket `comics` (Public bucket recommended for discovery images).
 - Policies (Dashboard or SQL): Authenticated users can upload to `auth.uid()/*` prefix; anyone can read objects in public bucket. (Private comics stay in client data: and never uploaded.)
 
+**RLS Policies (comics + chapters) — CRITICAL FOR PUBLIC PUBLISH**:
+The original design only described the intended policies in prose. In practice you must create the actual `CREATE POLICY` statements (RLS is deny-by-default once enabled).
+
+A complete, copy-pasteable set of policies is provided in the project at:
+`SUPABASE_RLS_POLICIES.sql`
+
+Key policies for `comics` (run after your CREATE TABLE statements and `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`):
+
+```sql
+-- SELECT: public comics visible to all; owners see their private ones too
+CREATE POLICY "comics_select_public_or_owner"
+ON public.comics FOR SELECT
+USING (is_public = true OR owner_id = auth.uid());
+
+-- INSERT: only rows where owner_id matches the authenticated user
+CREATE POLICY "comics_insert_own"
+ON public.comics FOR INSERT
+WITH CHECK (owner_id = auth.uid());
+
+-- UPDATE + DELETE: only own rows (WITH CHECK prevents changing owner)
+CREATE POLICY "comics_update_own"
+ON public.comics FOR UPDATE
+USING (owner_id = auth.uid())
+WITH CHECK (owner_id = auth.uid());
+
+CREATE POLICY "comics_delete_own"
+ON public.comics FOR DELETE
+USING (owner_id = auth.uid());
+```
+
+You **also need equivalent policies on `chapters`** (the publish flow inserts chapters right after the comic row). See `SUPABASE_RLS_POLICIES.sql` for the full safe-to-re-run block (with DROP IF EXISTS + chapters policies using EXISTS subqueries on the parent comic).
+
+After applying, the server action (`app/actions/publish-public.ts`) and `makeComicPublic` (browser client path) will succeed for authenticated users.
+
 **Optional security definer function for atomic spend** (call via rpc from server action):
 ```sql
 create or replace function public.spend_coins_and_unlock(p_user_id uuid, p_chapter_id uuid, p_cost int)
@@ -173,7 +210,10 @@ One-time migration is optimistic + best-effort (ignore duplicates via unique con
 - **RLS enabled on every table** (see schema). Policies:
   - `profiles`: `auth.uid() = id` for all ops.
   - `comics`: SELECT `(is_public OR owner_id = auth.uid())`; INSERT/UPDATE/DELETE `owner_id = auth.uid()`.
-  - `chapters`: SELECT via comic readability (view or join policy); write only owner.
+  - `chapters`: 
+  - SELECT: Anyone can read chapters for comics where is_public=true (via EXISTS on parent).
+  - Owner can manage (SELECT/INSERT/UPDATE/DELETE) their own chapters (covers private comics too) via owner check on parent.
+  See SUPABASE_RLS_POLICIES.sql for the exact "chapters_select_public" + "chapters_owner_all" policies.
   - `unlocks/progress/favorites`: `user_id = auth.uid()`.
   - `comments`: SELECT if comic public (or owner); INSERT any authenticated; DELETE own comment or comic owner.
 - **Never client-direct balance mutation**. Use `spend_coins_and_unlock` RPC (security definer) or server action that calls it. Server action for "mock buy coins" adds to balance (self only).

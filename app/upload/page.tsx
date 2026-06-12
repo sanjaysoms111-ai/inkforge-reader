@@ -12,13 +12,21 @@ import { Genre, PublishComicInput, Comic } from '../lib/types';
 import { SmartImage } from '../components/SmartImage';
 import {
   MAX_PANELS_PER_CHAPTER,
+  MAX_FILE_SIZE_BYTES,
   filterValidImageFiles,
   processImageFiles,
   generateThumbnail,
+  checkFileSizeWarnings,
+  formatBytes,
+  SIZE_WARNING_BYTES,
 } from '../lib/uploadUtils';
 import { useUser } from '../lib/UserContext';
 import { uploadComicMediaToStorage, prepareMediaForUpload } from '../lib/supabase/storage';
 import { getSupabaseBrowserClient } from '../lib/supabase/client';
+import DropZone from '../components/DropZone';
+import { UploadProgress, type UploadItem } from '../components/UploadProgress';
+import { PreviewReaderModal, type PreviewChapter } from '../components/PreviewReaderModal';
+import { publishPublicComic } from '../actions/publish-public';
 
 const ALL_GENRES: Genre[] = [
   "Fantasy", "Romance", "Action", "Mystery", "Sci-Fi",
@@ -86,6 +94,9 @@ export default function UploadComicPage() {
   // Public / Private (new for Supabase shared library)
   const [isPublic, setIsPublic] = useState(false);
 
+  // Real-time upload items for "all images" progress (Storage phase)
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
+
   // Keyboard + a11y helpers
   const [announce, setAnnounce] = useState(''); // for aria-live polite announcements
 
@@ -116,6 +127,17 @@ export default function UploadComicPage() {
   const handleCoverFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setError(null);
+
+    const { warned, oversized } = checkFileSizeWarnings(files);
+    if (oversized.length) {
+      setError(`File too large (${formatBytes(oversized[0].size)}). Max ${formatBytes(MAX_FILE_SIZE_BYTES)} supported.`);
+      return;
+    }
+    if (warned.length) {
+      setError(`Large file (${formatBytes(warned[0].size)}). It will be resized + converted but consider smaller source images.`);
+      // continue (non-blocking warning)
+    }
+
     const file = files[0];
     setProcessingProgress({ current: 0, total: 1, label: 'Processing cover image...' });
 
@@ -205,6 +227,15 @@ export default function UploadComicPage() {
   const handleChapterPanelFiles = async (chIndex: number, files: FileList | null) => {
     if (!files || files.length === 0) return;
     setError(null);
+
+    const { warned, oversized } = checkFileSizeWarnings(files);
+    if (oversized.length) {
+      setError(`One or more files exceed max size (${formatBytes(oversized[0].size)} > ${formatBytes(MAX_FILE_SIZE_BYTES)}).`);
+      return;
+    }
+    if (warned.length) {
+      setError(`Large file(s) detected (> ${formatBytes(SIZE_WARNING_BYTES)}). They will be optimized but upload may be slower.`);
+    }
 
     const currentCount = chapters[chIndex]?.panels.length || 0;
     const { valid: toProcess, skippedCount, wouldExceed } = filterValidImageFiles(files, currentCount);
@@ -363,6 +394,7 @@ export default function UploadComicPage() {
     if (processingProgress) return;
 
     try {
+      console.log('[upload handlePublish] isPublic state at publish time=', isPublic, 'user=', !!user);
       // Prepare base input (first chapter always free - invariant)
       const chaptersForInput = await Promise.all(chapters.map(async (ch, idx) => {
         let thumb = ch.thumbnail;
@@ -391,28 +423,39 @@ export default function UploadComicPage() {
       };
 
       if (isPublic && user) {
-        // PUBLIC PATH: upload to Supabase Storage then DB (shared discovery)
-        setProcessingProgress({ current: 0, total: 0, label: 'Preparing upload...' });
+        // PUBLIC PATH: client Storage upload (real-time per-image progress) → server action (secure DB insert)
+        const slugBase = (title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "comic");
+        const comicSlug = `${slugBase}-${Date.now().toString(36)}`;
 
-        // 1. Prepare list of media (cover + all panels) + do Storage upload with progress
+        setProcessingProgress({ current: 0, total: 0, label: 'Preparing secure cloud upload...' });
+        setUploadItems([]);
+
+        // 1. Prepare media (cover + all panels)
         const mediaFiles = prepareMediaForUpload(coverUrl, chapters.map((ch, i) => ({ number: i + 1, panels: ch.panels })));
         const totalFiles = mediaFiles.length;
 
+        // Seed real-time list for UploadProgress component (shows every image)
+        const initialItems: UploadItem[] = mediaFiles.map(m => ({ key: m.key, done: false }));
+        setUploadItems(initialItems);
+
+        // 2. Storage upload with granular callback (real-time for all images)
         const urlMap = await uploadComicMediaToStorage(
           user.id,
-          // simple slug from title for folder (context will ensure unique on ingest if needed)
-          (title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "comic") + "-" + Date.now().toString(36),
+          comicSlug,
           mediaFiles,
           (uploaded, total, key) => {
             setProcessingProgress({
               current: uploaded,
               total,
-              label: `Uploading to cloud${key ? ` (${key})` : ""}...`,
+              label: `Uploading to Supabase Storage (${uploaded}/${total})`,
             });
+            if (key) {
+              setUploadItems(prev => prev.map(it => (it.key === key ? { ...it, done: true } : it)));
+            }
           }
         );
 
-        // 2. Build final input with https URLs (replace data: with the uploaded ones)
+        // 3. Replace data: with https in the chapter list
         const publicCover = urlMap["cover"] || coverUrl;
         const publicChapters = chaptersForInput.map((chIn, cIdx) => {
           const chDraft = chapters[cIdx];
@@ -429,61 +472,39 @@ export default function UploadComicPage() {
           chapters: publicChapters,
         };
 
-        // 3. Insert to Supabase DB (comics then chapters). Use browser client + RLS (owner_id enforced by policy)
-        const supabase = getSupabaseBrowserClient();
-        const slugBase = publicInput.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-        let slug = `${slugBase}-${Date.now().toString(36)}`;
-        // best-effort unique (DB has constraint; fallback suffix if needed)
-        let suffix = 1;
-        // (simple client-side check omitted for brevity; server will error on dup)
+        // 4. Secure server action (uses server client + cookies for RLS; revalidates paths)
+        setProcessingProgress({ current: totalFiles, total: totalFiles, label: 'Saving to database...' });
 
-        const { data: insertedComic, error: comicErr } = await supabase
-          .from("comics")
-          .insert({
-            owner_id: user.id,
-            slug,
-            title: publicInput.title,
-            author: publicInput.author,
-            description: publicInput.description,
-            cover_url: publicInput.coverUrl,
-            genres: publicInput.genres,
-            tags: publicInput.tags || [],
-            status: publicInput.status,
-            is_public: true,
-            unlock_all_price: publicInput.unlockAllPrice,
-            source: "user",
-          })
-          .select()
-          .single();
+        console.log('[upload] calling publishPublicComic with isPublic from state=', isPublic, ' (should be true)');
+        const inserted = await publishPublicComic({
+          slug: comicSlug,
+          title: publicInput.title,
+          author: publicInput.author,
+          description: publicInput.description,
+          coverUrl: publicInput.coverUrl,
+          genres: publicInput.genres,
+          tags: publicInput.tags,
+          status: publicInput.status,
+          unlockAllPrice: publicInput.unlockAllPrice,
+          isPublic: true,  // explicitly pass true because we are in the Public branch
+          chapters: publicInput.chapters.map((ch, i) => ({
+            number: i + 1,
+            title: ch.title,
+            isPremium: ch.isPremium,
+            coinPrice: ch.coinPrice,
+            panels: ch.panels,
+          })),
+        });
 
-        if (comicErr || !insertedComic) throw new Error(comicErr?.message || "Failed to insert comic to DB");
-
-        // Insert chapters (use the returned comic id)
-        const chapterRows = publicInput.chapters.map((ch, idx) => ({
-          comic_id: insertedComic.id,
-          number: idx + 1,
-          title: ch.title,
-          is_premium: ch.isPremium,
-          coin_price: ch.coinPrice ?? 10,
-          panels: ch.panels, // the https urls
-        }));
-
-        const { error: chErr } = await supabase.from("chapters").insert(chapterRows);
-        if (chErr) {
-          // best effort cleanup of orphan comic row (optional)
-          await supabase.from("comics").delete().eq("id", insertedComic.id);
-          throw new Error(chErr.message);
-        }
-
-        // 4. Build normalized comic for immediate ingest (https panels)
+        // 5. Immediate ingest into hybrid context (https panels)
         const normalizedPublic: Comic = {
-          id: insertedComic.id,
-          slug: insertedComic.slug,
-          title: insertedComic.title,
-          author: insertedComic.author,
-          coverUrl: insertedComic.cover_url,
-          genres: (insertedComic.genres || []) as Genre[],
-          description: insertedComic.description || "",
+          id: (inserted as any).id || comicSlug,
+          slug: (inserted as any).slug || comicSlug,
+          title: publicInput.title,
+          author: publicInput.author,
+          coverUrl: publicInput.coverUrl,
+          genres: (publicInput.genres || []) as Genre[],
+          description: publicInput.description || "",
           chapters: publicInput.chapters.map((ch, i) => ({
             id: `pub-ch-${i}-${Date.now()}`,
             number: i + 1,
@@ -502,21 +523,21 @@ export default function UploadComicPage() {
           isPublic: true,
         };
 
-        // Ingest immediately (context will merge; future reloads will refetch from DB)
         ingestPublicComic(normalizedPublic);
-
-        // Also record history (light metadata) + clear draft
         recordUploadToHistory(normalizedPublic as any);
         deleteUploadDraft(DRAFT_KEY);
 
         setProcessingProgress(null);
-        // Success toast
+        setUploadItems([]);
+
+        // Success toast + redirect to /library (per Advanced goals) or detail
         const toast = document.createElement("div");
         toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
-        toast.textContent = "Public comic published successfully!";
+        toast.textContent = "Public comic published successfully! Opening Library...";
         document.body.appendChild(toast);
-        setTimeout(() => toast.remove(), 2200);
-        router.push("/");
+        setTimeout(() => toast.remove(), 2400);
+
+        router.push("/library");
         return;
       }
 
@@ -541,9 +562,19 @@ export default function UploadComicPage() {
       recordUploadToHistory(created);
       deleteUploadDraft(DRAFT_KEY);
 
-      router.push("/");
+      // Success toast + redirect to library (consistent with public flow)
+      const privToast = document.createElement("div");
+      privToast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
+      privToast.textContent = "Comic saved to your library!";
+      document.body.appendChild(privToast);
+      setTimeout(() => privToast.remove(), 2000);
+      router.push("/library");
     } catch (e: any) {
-      setError(e.message || "Failed to publish comic. Check console for details.");
+      let msg = e.message || "Failed to publish comic. Check console for details.";
+      if (msg.toLowerCase().includes("row-level security") || msg.toLowerCase().includes("violates")) {
+        msg += " — Run the policies in SUPABASE_RLS_POLICIES.sql (comics_insert_own is required) then retry.";
+      }
+      setError(msg);
       setProcessingProgress(null);
     }
   };
@@ -651,21 +682,31 @@ export default function UploadComicPage() {
           </div>
         )}
 
-        {/* Global processing progress (visible for cover or any chapter batch) */}
+        {/* Global processing + real-time Storage upload progress (all images) */}
         {processingProgress && (
-          <div className="mb-4 glass rounded-xl border border-[var(--border)] p-3 text-sm">
-            <div className="flex items-center justify-between text-xs mb-1">
-              <span className="font-medium text-[var(--accent)]">{processingProgress.label}</span>
-              <span className="tabular-nums text-[var(--text-muted)]">{processingProgress.current} / {processingProgress.total}</span>
+          uploadItems.length > 0 ? (
+            <UploadProgress
+              current={processingProgress.current}
+              total={processingProgress.total}
+              label={processingProgress.label}
+              items={uploadItems}
+              className="mb-4"
+            />
+          ) : (
+            <div className="mb-4 glass rounded-xl border border-[var(--border)] p-3 text-sm">
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="font-medium text-[var(--accent)]">{processingProgress.label}</span>
+                <span className="tabular-nums text-[var(--text-muted)]">{processingProgress.current} / {processingProgress.total}</span>
+              </div>
+              <div className="h-1.5 bg-[var(--bg-elev)] rounded-full overflow-hidden">
+                <div
+                  className="h-1.5 bg-[var(--accent)] transition-all duration-150"
+                  style={{ width: `${Math.round((processingProgress.current / Math.max(1, processingProgress.total)) * 100)}%` }}
+                />
+              </div>
+              <div className="text-[10px] text-[var(--text-muted)] mt-1">Optimizing (resize + WebP where supported) to keep localStorage usage reasonable.</div>
             </div>
-            <div className="h-1.5 bg-[var(--bg-elev)] rounded-full overflow-hidden">
-              <div
-                className="h-1.5 bg-[var(--accent)] transition-all duration-150"
-                style={{ width: `${Math.round((processingProgress.current / Math.max(1, processingProgress.total)) * 100)}%` }}
-              />
-            </div>
-            <div className="text-[10px] text-[var(--text-muted)] mt-1">Optimizing (resize + WebP where supported) to keep localStorage usage reasonable.</div>
-          </div>
+          )
         )}
 
         {/* Advanced: Drafts / History + aria live for announcements + shortcuts help */}
@@ -857,23 +898,12 @@ export default function UploadComicPage() {
               </div>
 
               {!coverUrl ? (
-                <label
-                  onDrop={(e) => { e.preventDefault(); setIsDragOverCover(false); handleCoverFiles(e.dataTransfer.files); }}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDragEnter={() => setIsDragOverCover(true)}
-                  onDragLeave={() => setIsDragOverCover(false)}
-                  className={`flex flex-col items-center justify-center border-2 border-dashed rounded-2xl py-10 cursor-pointer transition ${isDragOverCover ? 'border-[var(--accent)] ring-2 ring-[var(--accent)]/40 bg-[var(--accent)]/5' : 'border-[var(--border)] hover:border-[var(--accent)]/60'}`}
-                >
-                  <Upload className="mb-3 text-[var(--text-muted)]" />
-                  <div className="text-sm">Drag &amp; drop cover or click to choose</div>
-                  <div className="text-[10px] text-[var(--text-muted)] mt-1">JPG / PNG / WEBP • large files auto-compressed (WebP preferred)</div>
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    className="hidden"
-                    onChange={(e) => handleCoverFiles(e.target.files)}
-                  />
-                </label>
+                <DropZone
+                  onFiles={(fs) => handleCoverFiles(fs as any)}
+                  label="Drag & drop cover or click to choose"
+                  sublabel="JPG / PNG / WEBP • client-side resize + WebP optimization (recommended < 3MB before optimize)"
+                  className="py-8"
+                />
               ) : (
                 <div className="relative">
                   <SmartImage
@@ -969,10 +999,31 @@ export default function UploadComicPage() {
                     return (
                       <motion.div
                         key={idx}
+                        draggable
+                        onDragStart={(e) => {
+                          (e as any).dataTransfer?.setData('text/chidx', String(idx));
+                          (e as any).dataTransfer?.setEffectAllowed?.('move');
+                        }}
+                        onDragOver={(e) => { e.preventDefault(); if ((e as any).dataTransfer) (e as any).dataTransfer.dropEffect = 'move'; }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const fromStr = (e as any).dataTransfer?.getData('text/chidx');
+                          const from = fromStr ? parseInt(fromStr, 10) : -1;
+                          if (!isNaN(from) && from !== idx) {
+                            // reuse existing moveChapter logic but direct swap for drag
+                            setChapters(prev => {
+                              const copy = [...prev];
+                              const [moved] = copy.splice(from, 1);
+                              copy.splice(idx, 0, moved);
+                              return copy;
+                            });
+                          }
+                        }}
                         initial={{ opacity: 0, y: 8 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -8 }}
-                        className="rounded-2xl border border-[var(--border)] bg-[var(--bg-elev)]/60 p-4"
+                        className="rounded-2xl border border-[var(--border)] bg-[var(--bg-elev)]/60 p-4 cursor-grab active:cursor-grabbing"
+                        title="Drag chapter header to reorder chapters"
                       >
                         <div className="flex items-start gap-3">
                           {/* Chapter header controls */}
@@ -1177,12 +1228,12 @@ export default function UploadComicPage() {
                 {showPreview ? 'Hide' : 'Show'} form preview
               </button>
               <button
-                onClick={() => setShowReaderPreview(!showReaderPreview)}
+                onClick={() => setShowReaderPreview(true)}
                 disabled={!canPublish()}
                 className="text-xs px-3 py-1 rounded border border-[var(--accent)]/70 text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50"
-                title="Preview this comic in a reader view before publishing (robust upload flow)"
+                title="Open full preview reader (vertical) before publishing — supports multi-chapter"
               >
-                {showReaderPreview ? 'Hide' : 'Preview in Reader'}
+                Preview in Reader
               </button>
             </div>
 
@@ -1233,37 +1284,25 @@ export default function UploadComicPage() {
               )}
             </AnimatePresence>
 
-            {/* Robust upload preview reader (inline simple vertical view using existing SmartImage + draft data). Highest priority for "preview reader" in upload flow. */}
-            <AnimatePresence>
-              {showReaderPreview && canPublish() && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-3 glass rounded-2xl border border-[var(--border)] p-3 max-h-[60vh] overflow-auto"
-                >
-                  <div className="text-xs font-medium mb-2 flex items-center justify-between">
-                    <span>Reader Preview (draft — vertical, first chapter free on publish)</span>
-                    <button onClick={() => setShowReaderPreview(false)} className="text-[var(--text-muted)]">Close</button>
-                  </div>
-                  <div className="space-y-2">
-                    {previewComic.chapters[0] && previewComic.chapters[0].panels.slice(0, 8).map((url, idx) => ( // limit for perf in preview
-                      <div key={idx} className="flex justify-center">
-                        <SmartImage 
-                          src={url} 
-                          alt={`Preview panel ${idx + 1}`} 
-                          className="max-w-full w-auto max-h-[70vh] rounded shadow" 
-                        />
-                      </div>
-                    ))}
-                    {previewComic.chapters[0] && previewComic.chapters[0].panels.length > 8 && (
-                      <div className="text-center text-xs text-[var(--text-muted)]">... (more panels in full reader after publish)</div>
-                    )}
-                  </div>
-                  <div className="text-[10px] text-[var(--text-muted)] mt-2">This uses the same rendering as the published reader. Publish to save and read full with progress/comments etc.</div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+            {/* Advanced Preview Reader Modal (full vertical reader simulation before publish) */}
+            <PreviewReaderModal
+              open={showReaderPreview}
+              onClose={() => setShowReaderPreview(false)}
+              title={previewComic.title}
+              author={previewComic.author}
+              chapters={previewComic.chapters.map((ch): PreviewChapter => ({
+                number: ch.number,
+                title: ch.title,
+                panels: ch.panels,
+                isPremium: ch.isPremium,
+              }))}
+              onPublish={() => {
+                setShowReaderPreview(false);
+                // trigger the real publish (user already validated canPublish)
+                if (!processingProgress) handlePublish();
+              }}
+              isPublishing={!!processingProgress}
+            />
 
             {/* Actions */}
             <div className="sticky bottom-4 z-10">

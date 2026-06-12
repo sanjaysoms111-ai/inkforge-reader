@@ -13,6 +13,7 @@ import { MOCK_COMICS } from "./mockData";
 import { getSupabaseBrowserClient } from "./supabase/client";
 import { useUser } from "./UserContext";
 import { uploadComicMediaToStorage, prepareMediaForUpload } from "./supabase/storage";
+import { publishPublicComic } from "../actions/publish-public";
 
 // Bridge format published by the inkforg_apexpanel Creator App
 // (extended to support real per-panel dialogues from newer Creator exports)
@@ -141,6 +142,9 @@ interface ComicsContextType {
   checkAchievements: () => void; // called internally on actions
 
   // Share helpers (no new state)
+  // Enhanced to prefer native Web Share API (great on mobile/PWA) with clipboard fallback + toast.
+  shareLink: (slug: string, chapterNumber?: number) => Promise<void>;
+  // Legacy alias
   copyChapterLink: (slug: string, chapterNumber: number) => Promise<void>;
 
   // Creator analytics (mock views + unlocks computed from existing state; incremented on read)
@@ -306,16 +310,33 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
   async function fetchAndMergePublicComics(userId: string) {
     try {
       const supabase = getSupabaseBrowserClient();
-      // Fetch public + my comics (RLS will limit appropriately)
-      const { data: rows, error } = await supabase
+
+      // Explicitly fetch *public* comics + their chapters.
+      // The join "*, chapters (*)" + the chapters RLS policy "chapters_select_public"
+      // (which allows SELECT when parent.is_public = true) ensures that other users
+      // see the full chapter list (panels) for public comics.
+      const { data: publicRows, error: pubErr } = await supabase
         .from("comics")
         .select("*, chapters (*)")
-        .or(`is_public.eq.true,owner_id.eq.${userId}`)
+        .eq("is_public", true)
         .order("published_at", { ascending: false });
 
-      if (error || !rows) return;
+      // Also fetch the current user's comics (includes their private ones + any public they own).
+      // RLS + the owner side of chapters policies will return their chapters.
+      const { data: ownRows, error: ownErr } = await supabase
+        .from("comics")
+        .select("*, chapters (*)")
+        .eq("owner_id", userId)
+        .order("published_at", { ascending: false });
 
-      const fetched = rows.map(normalizeSupabaseComic);
+      if (pubErr && ownErr) return;
+
+      const allRows = [
+        ...(publicRows || []),
+        ...((ownRows || []).filter(r => !(publicRows || []).some(p => p.id === r.id))) // dedupe
+      ];
+
+      const fetched = allRows.map(normalizeSupabaseComic);
 
       setComics((prev) => {
         const bySlug = new Map(prev.map((c) => [c.slug, c]));
@@ -395,48 +416,41 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
 
     const finalComic = updatedComic;
 
-    // Insert / update in Supabase DB as public
-    const supabase = getSupabaseBrowserClient();
-    const { data: insComic, error: cErr } = await supabase
-      .from('comics')
-      .upsert({
-        owner_id: user.id,
+    console.log('[makeComicPublic] about to call publishPublicComic (server action) for public=true slug=', finalComic.slug);
+
+    // Use the central server action (which now respects isPublic param + has debug logs)
+    // This ensures is_public=true is correctly set in DB and centralizes the write logic.
+    try {
+      const inserted = await publishPublicComic({
         slug: finalComic.slug,
         title: finalComic.title,
         author: finalComic.author,
         description: finalComic.description,
-        cover_url: finalComic.coverUrl,
+        coverUrl: finalComic.coverUrl,
         genres: finalComic.genres,
         tags: finalComic.tags || [],
         status: finalComic.status || 'ongoing',
-        is_public: true,
-        unlock_all_price: finalComic.unlockAllPrice,
-        source: 'user',
-        views: finalComic.views || 0,
-      }, { onConflict: 'slug' })
-      .select()
-      .single();
+        unlockAllPrice: finalComic.unlockAllPrice,
+        isPublic: true, // we are intentionally making this public
+        chapters: finalComic.chapters.map((ch) => ({
+          number: ch.number || 1,
+          title: ch.title,
+          isPremium: ch.isPremium,
+          coinPrice: ch.coinPrice,
+          panels: ch.panels,
+          thumbnail: ch.thumbnail,
+        })),
+      });
 
-    if (cErr || !insComic) {
-      console.error('DB upsert comic for public failed', cErr);
-      // still ingest local https version
+      // Ingest the https version immediately (action already did the real DB insert)
+      ingestPublicComic({ ...finalComic, id: (inserted as any)?.id || finalComic.id, isPublic: true });
+    } catch (e: any) {
+      console.error('[makeComicPublic] publishPublicComic failed', e);
+      // still ingest so UX doesn't break completely (local view of the https version)
       ingestPublicComic(finalComic);
-      return;
+      // rethrow so caller can show error if desired
+      throw e;
     }
-
-    // chapters
-    const chRows = finalComic.chapters.map((ch, idx) => ({
-      comic_id: insComic.id,
-      number: ch.number || (idx + 1),
-      title: ch.title,
-      is_premium: ch.isPremium,
-      coin_price: ch.coinPrice ?? 10,
-      panels: ch.panels,
-    }));
-    await supabase.from('chapters').upsert(chRows, { onConflict: 'comic_id,number' });
-
-    // Ingest the https version immediately
-    ingestPublicComic({ ...finalComic, id: insComic.id, isPublic: true });
 
   }, [user?.id, comics, ingestPublicComic]);
 
@@ -1237,10 +1251,31 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
     return count;
   }, [currentStreak]);
 
-  // Share chapter link (copyable URL)
-  const copyChapterLink = useCallback(async (slug: string, chapterNumber: number) => {
-    const url = (typeof window !== 'undefined' ? window.location.origin : '') + `/read/${slug}/${chapterNumber}`;
+  // Share helper: prefers native Web Share API, falls back to clipboard + toast.
+  // Works for chapters (/read/slug/ch) or whole comics (/comics/slug).
+  const shareLink = useCallback(async (slug: string, chapterNumber?: number) => {
+    if (typeof window === 'undefined') return;
+
+    const path = chapterNumber != null
+      ? `/read/${slug}/${chapterNumber}`
+      : `/comics/${slug}`;
+
+    const url = window.location.origin + path;
+    const title = chapterNumber != null
+      ? `Chapter ${chapterNumber} - Inkforge Reader`
+      : 'Inkforge Reader - Comic';
+
     try {
+      // Best experience: native share sheet (mobile, desktop Chrome, PWA, etc.)
+      if (navigator.share) {
+        await navigator.share({
+          title,
+          url,
+        });
+        return;
+      }
+
+      // Fallback: clipboard + visible toast (matches app toast style)
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(url);
       } else {
@@ -1251,10 +1286,20 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
         document.execCommand('copy');
         document.body.removeChild(ta);
       }
+
+      const toast = document.createElement("div");
+      toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
+      toast.textContent = "Link copied to clipboard!";
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 2200);
     } catch (e) {
-      console.warn('Copy failed', e);
+      // User cancelled native share or clipboard denied — silent or minimal log
+      console.warn('Share failed or cancelled', e);
     }
   }, []);
+
+  // Backward-compatible alias (some older references may use the old name)
+  const copyChapterLink = useCallback((slug: string, chapterNumber: number) => shareLink(slug, chapterNumber), [shareLink]);
 
   // Creator analytics helpers (mock; views incremented on read; no monetizing so unlockCount=0)
   const getCreatorAnalytics = useCallback((slug: string) => {
@@ -1592,6 +1637,7 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
     getCurrentStreak,
     getAchievements,
     checkAchievements,
+    shareLink,
     copyChapterLink,
     getCreatorAnalytics,
     recordCreatorView,

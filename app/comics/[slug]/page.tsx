@@ -2,7 +2,7 @@
 
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, BookOpen, Eye, Trash2 } from "lucide-react";
+import { ArrowLeft, BookOpen, Eye, Trash2, Share2 } from "lucide-react";
 import { motion } from "framer-motion";
 import { Suspense } from "react";
 import { useComics } from "../../lib/ComicsContext";
@@ -15,7 +15,7 @@ import { useState, useEffect } from "react";
 export default function ComicDetailPage() {
   const params = useParams<{ slug: string }>();
   const router = useRouter();
-  const { getComicBySlug, removePublishedComic, getCreatorAnalytics, recordCreatorView } = useComics();
+  const { getComicBySlug, removePublishedComic, getCreatorAnalytics, recordCreatorView, shareLink } = useComics();
 
   const comic = getComicBySlug(params.slug);
 
@@ -120,6 +120,15 @@ export default function ComicDetailPage() {
               className="btn-primary flex items-center justify-center gap-2 rounded-xl px-8 py-3 text-sm font-semibold shadow-sm hover:shadow-md transition-all"
             >
               <BookOpen className="h-4 w-4" /> Start Reading
+            </motion.button>
+
+            <motion.button
+              onClick={() => shareLink(comic.slug)}
+              whileTap={{ scale: 0.985 }}
+              className="btn-ghost flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm border border-[var(--border)] hover:bg-[var(--bg-elev)]"
+              title="Share this comic"
+            >
+              <Share2 size={16} /> Share
             </motion.button>
 
             {/* All content freely readable (monetizing features removed). isPremium shown for display only. */}

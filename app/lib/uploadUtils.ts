@@ -9,8 +9,9 @@
  * See DESIGN-creator-upload-dashboard.md and AGENTS.md.
  */
 
-export const MAX_PANELS_PER_CHAPTER = 50;
-export const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
+export const MAX_PANELS_PER_CHAPTER = 100;
+export const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5MB hard cap
+export const SIZE_WARNING_BYTES = 3 * 1024 * 1024; // >3MB triggers client warning (will be optimized but still large)
 export const VALID_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 
 export type ProcessingProgress = {
@@ -231,4 +232,34 @@ export async function generateThumbnail(
     img.onerror = () => resolve(panelDataUrl); // fallback to original (small risk)
     img.src = panelDataUrl;
   });
+}
+
+/**
+ * Size validation helper. Returns info for UI warnings.
+ * Large files are still accepted (optimizeImage will resize) but we surface a clear warning.
+ */
+export function checkFileSizeWarnings(files: File[] | FileList | null): {
+  oversized: File[];
+  warned: File[];
+  totalSize: number;
+} {
+  if (!files) return { oversized: [], warned: [], totalSize: 0 };
+  const arr = Array.isArray(files) ? files : Array.from(files);
+  const oversized: File[] = [];
+  const warned: File[] = [];
+  let total = 0;
+
+  for (const f of arr) {
+    total += f.size;
+    if (f.size > MAX_FILE_SIZE_BYTES) oversized.push(f);
+    else if (f.size > SIZE_WARNING_BYTES) warned.push(f);
+  }
+  return { oversized, warned, totalSize: total };
+}
+
+/** Human readable size */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

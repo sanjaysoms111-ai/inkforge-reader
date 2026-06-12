@@ -13,10 +13,15 @@ import {
   MAX_PANELS_PER_CHAPTER,
   filterValidImageFiles,
   processImageFiles,
+  checkFileSizeWarnings,
+  formatBytes,
 } from '../lib/uploadUtils';
 import { useUser } from '../lib/UserContext';
 import { uploadComicMediaToStorage, prepareMediaForUpload } from '../lib/supabase/storage';
 import { getSupabaseBrowserClient } from '../lib/supabase/client';
+import DropZone from '../components/DropZone';
+import { UploadProgress } from '../components/UploadProgress';
+import { publishPublicComic } from '../actions/publish-public';
 
 const ALL_GENRES: Genre[] = [
   "Fantasy", "Romance", "Action", "Mystery", "Sci-Fi",
@@ -157,6 +162,12 @@ export default function CreatorDashboard() {
     if (!editDraft || !files || files.length === 0) return;
     setError(null);
 
+    const { oversized } = checkFileSizeWarnings(files);
+    if (oversized.length) {
+      setError(`File too large (${formatBytes(oversized[0].size)}). Max supported ${formatBytes(5 * 1024 * 1024)}.`);
+      return;
+    }
+
     const currentCount = editDraft.chapters[chIdx]?.panels.length || 0;
     const { valid: toProcess, skippedCount, wouldExceed } = filterValidImageFiles(files, currentCount);
 
@@ -250,72 +261,68 @@ export default function CreatorDashboard() {
 
     try {
       if (editDraft.isPublic && user) {
-        // Migrate / ensure public: upload current data: to Storage + DB insert + ingest (https version)
-        setProcessingProgress({ current: 0, total: 1, label: 'Publishing as public...' });
+        // Public migration path: upload (any remaining data:) + secure server action insert
+        setProcessingProgress({ current: 0, total: 1, label: 'Uploading to cloud for public...' });
 
         const media = prepareMediaForUpload(
-          editDraft.chapters[0]?.panels?.[0] ? '' : '', // cover handled separately if present; for simplicity use existing cover logic below
-          chaptersForSave.map((c, i) => ({ number: i+1, panels: c.panels }))
+          '', // cover: reuse existing https or first panel if needed; Storage handles only data:
+          chaptersForSave.map((c, i) => ({ number: i + 1, panels: c.panels }))
         );
-        // For edit we may not have fresh cover dataUrl in draft; fall back to using the comic's current cover if data, or skip re-upload of cover
-        // Simpler: use the draft's first chapter panels + assume cover is already set on the comic or re-use a panel for demo.
-        // To keep robust, upload the chapter panels at minimum; cover can stay the local one or we re-derive.
-        const coverForUpload = (editDraft as any)._origCoverData || ''; // not always present; pages will use the existing coverUrl for the row
 
-        const urlMap = await uploadComicMediaToStorage(user.id, editDraft.title.toLowerCase().replace(/[^a-z0-9]/g, '-') + "-edit", media, (u, t) => setProcessingProgress({ current: u, total: t, label: 'Uploading public assets...' }));
+        const comicSlug = (editDraft.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "comic") + "-pubedit-" + Date.now().toString(36);
+        const urlMap = media.length > 0
+          ? await uploadComicMediaToStorage(user.id, comicSlug, media, (u, t) => setProcessingProgress({ current: u, total: t, label: `Uploading assets (${u}/${t})` }))
+          : {};
 
-        // Build DB row (minimal) + ingest a hybrid comic
-        const supabase = getSupabaseBrowserClient();
-        const slug = editDraft.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") + "-pub";
-        const { data: insComic } = await supabase.from("comics").insert({
-          owner_id: user.id,
-          slug,
+        const origComic = myComics.find(c => c.id === editingId);
+        const finalCover = (origComic?.coverUrl && !origComic.coverUrl.startsWith('data:')) ? origComic.coverUrl : (chaptersForSave[0]?.panels?.[0] || '');
+
+        setProcessingProgress({ current: 1, total: 1, label: 'Saving public comic...' });
+
+        console.log('[creator] calling publishPublicComic with editDraft.isPublic=', editDraft.isPublic);
+        const inserted = await publishPublicComic({
+          slug: comicSlug,
           title: editDraft.title.trim(),
           author: editDraft.author.trim() || "You",
           description: editDraft.description.trim(),
-          cover_url: (myComics.find(c => c.id === editingId)?.coverUrl) || "", // keep existing cover or update if we had data
+          coverUrl: finalCover,
           genres: editDraft.genres,
           tags: editDraft.tags,
           status: editDraft.status,
-          is_public: true,
-          unlock_all_price: editDraft.unlockAllPrice,
-          source: "user",
-        }).select().single();
-
-        if (insComic) {
-          const chRows = chaptersForSave.map((ch, i) => ({
-            comic_id: insComic.id,
+          unlockAllPrice: editDraft.unlockAllPrice,
+          isPublic: editDraft.isPublic ?? true,
+          chapters: chaptersForSave.map((ch, i) => ({
             number: i + 1,
             title: ch.title,
-            is_premium: ch.isPremium,
-            coin_price: ch.coinPrice ?? 10,
-            panels: ch.panels.map((_, pi) => urlMap[`ch${i+1}-p${pi}`] || ch.panels[pi]),
-          }));
-          await supabase.from("chapters").insert(chRows);
+            isPremium: ch.isPremium,
+            coinPrice: ch.coinPrice,
+            panels: ch.panels.map((p, pi) => urlMap[`ch${i + 1}-p${pi}`] || p),
+          })),
+        });
 
-          const normalized: Comic = {
-            id: insComic.id,
-            slug: insComic.slug,
-            title: insComic.title,
-            author: insComic.author,
-            coverUrl: insComic.cover_url || (myComics.find(c => c.id === editingId)?.coverUrl || ""),
-            genres: editDraft.genres,
-            description: editDraft.description.trim(),
-            chapters: chaptersForSave.map((ch, i) => ({ ...ch, panels: ch.panels.map((p, pi) => urlMap[`ch${i+1}-p${pi}`] || p) })),
-            views: 0,
-            publishedAt: new Date().toISOString().split("T")[0],
-            isAIGenerated: true,
-            source: "user",
-            status: editDraft.status,
-            tags: editDraft.tags,
-            unlockAllPrice: editDraft.unlockAllPrice,
-            isPublic: true,
-          };
-          ingestPublicComic(normalized);
-        }
+        const normalized: Comic = {
+          id: (inserted as any).id || comicSlug,
+          slug: (inserted as any).slug || comicSlug,
+          title: editDraft.title.trim(),
+          author: editDraft.author.trim() || "You",
+          coverUrl: finalCover,
+          genres: editDraft.genres,
+          description: editDraft.description.trim(),
+          chapters: chaptersForSave.map((ch, i) => ({ ...ch, panels: ch.panels.map((p, pi) => urlMap[`ch${i + 1}-p${pi}`] || p) })),
+          views: 0,
+          publishedAt: new Date().toISOString().split("T")[0],
+          isAIGenerated: true,
+          source: "user",
+          status: editDraft.status,
+          tags: editDraft.tags,
+          unlockAllPrice: editDraft.unlockAllPrice,
+          isPublic: true,
+        };
+        ingestPublicComic(normalized);
+
         setProcessingProgress(null);
-        setSuccess("Saved as Public (cloud).");
-        setTimeout(() => { closeEditor(); setSuccess(null); }, 900);
+        setSuccess("Published publicly (cloud). Visible in Library + Discover.");
+        setTimeout(() => { closeEditor(); setSuccess(null); }, 1100);
         return;
       }
 
@@ -602,7 +609,24 @@ export default function CreatorDashboard() {
                       const isFirst = idx === 0;
                       const premium = isFirst ? false : ch.isPremium;
                       return (
-                        <div key={idx} className="rounded-2xl border border-[var(--border)] bg-[var(--bg)]/60 p-3">
+                        <div
+                          key={idx}
+                          draggable
+                          onDragStart={(e) => { e.dataTransfer.setData('text/chidx', String(idx)); e.dataTransfer.effectAllowed = 'move'; }}
+                          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const from = parseInt(e.dataTransfer.getData('text/chidx'), 10);
+                            if (!isNaN(from) && from !== idx && editDraft) {
+                              const chapters = [...editDraft.chapters];
+                              const [m] = chapters.splice(from, 1);
+                              chapters.splice(idx, 0, m);
+                              updateDraftMeta({ chapters: chapters.map((c, i) => ({ ...c, number: i + 1 })) });
+                            }
+                          }}
+                          className="rounded-2xl border border-[var(--border)] bg-[var(--bg)]/60 p-3 cursor-grab active:cursor-grabbing"
+                          title="Drag to reorder chapters"
+                        >
                           <div className="flex gap-3 items-start">
                             <div className="flex-1">
                               <div className="flex items-center gap-2 mb-1">
@@ -638,10 +662,15 @@ export default function CreatorDashboard() {
                                     ))}
                                   </div>
                                 )}
-                                <label className="mt-2 inline-block text-xs cursor-pointer underline-offset-2 hover:underline text-[var(--accent)]">
-                                  + Add panels to this chapter
-                                  <input type="file" multiple accept="image/jpeg,image/png,image/webp" className="hidden" onChange={e => addPanelsToExistingChapter(idx, e.target.files)} />
-                                </label>
+                                <div className="mt-2">
+                                  <DropZone
+                                    onFiles={(fs) => addPanelsToExistingChapter(idx, fs as any)}
+                                    compact
+                                    label="+ Add panels (drag or click)"
+                                    sublabel=""
+                                    className="py-3 border-[var(--border)]/70"
+                                  />
+                                </div>
                               </div>
                             </div>
 
@@ -673,7 +702,7 @@ export default function CreatorDashboard() {
                       <button onClick={addBulkNewChapter} disabled={!bulkNewChapterTitle.trim() && bulkNewChapterFiles.length === 0} className="rounded bg-[var(--accent)] text-white px-4 text-sm disabled:opacity-60">Add Chapter</button>
                     </div>
                     {bulkNewChapterFiles.length > 0 && <div className="text-xs mt-1 text-[var(--text-muted)]">{bulkNewChapterFiles.length} images ready for new chapter.</div>}
-                    {processingProgress && <div className="mt-2 text-xs text-[var(--accent)]">{processingProgress.label} ({processingProgress.current}/{processingProgress.total})</div>}
+                    {processingProgress && <UploadProgress current={processingProgress.current} total={processingProgress.total} label={processingProgress.label} className="mt-2" />}
                   </div>
                 </div>
 

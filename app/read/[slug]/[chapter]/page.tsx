@@ -3,14 +3,14 @@
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useState } from "react";
-import { ArrowLeft, List, X } from "lucide-react";
+import { ArrowLeft, List, X, Share2 } from "lucide-react";
 import { useComics } from "../../../lib/ComicsContext";
 import { useUser } from "../../../lib/UserContext";
 
 export default function ReaderPage() {
   const params = useParams<{ slug: string; chapter: string }>();
   const router = useRouter();
-  const { getComicBySlug } = useComics();
+  const { getComicBySlug, shareLink } = useComics();
   const { isChapterUnlocked: userIsChapterUnlocked, coinBalance } = useUser();
 
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -33,6 +33,13 @@ export default function ReaderPage() {
         </Link>
         <div className="flex items-center gap-2">
           <span className="text-[10px]">Ch.{chNum} {chapter.isPremium ? "PREMIUM" : ""}</span>
+          <button
+            onClick={() => shareLink(comic.slug, chNum)}
+            className="btn-ghost p-1 rounded flex items-center gap-1 text-xs"
+            title="Share this chapter"
+          >
+            <Share2 size={15} /> <span className="hidden sm:inline">Share</span>
+          </button>
           <button onClick={() => setDrawerOpen(true)} className="btn-ghost p-1 rounded" title="Chapters"><List size={15} /></button>
           <Link href="/" className="text-xs px-2">Close</Link>
         </div>

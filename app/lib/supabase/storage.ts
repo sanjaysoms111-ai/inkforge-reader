@@ -62,6 +62,37 @@ export async function uploadComicMediaToStorage(
 }
 
 /**
+ * Optional: after main media upload, upload any chapter thumbnails (small data URLs).
+ * Returns map of chNum -> thumb https url. Non-fatal if missing thumbs.
+ */
+export async function uploadChapterThumbnails(
+  userId: string,
+  comicSlug: string,
+  thumbs: Array<{ chapterNumber: number; dataUrl: string }>,
+  onProgress?: (done: number, total: number) => void
+): Promise<Record<number, string>> {
+  const supabase = getSupabaseBrowserClient();
+  const bucket = "comics";
+  const prefix = `comics/${userId}/${comicSlug}/thumbs`;
+  const out: Record<number, string> = {};
+  let done = 0;
+  for (const t of thumbs) {
+    try {
+      const res = await fetch(t.dataUrl);
+      const blob = await res.blob();
+      const path = `${prefix}/ch${t.chapterNumber}.webp`;
+      await supabase.storage.from(bucket).upload(path, blob, { upsert: true, contentType: 'image/webp' });
+      const { data } = supabase.storage.from(bucket).getPublicUrl(path);
+      if (data?.publicUrl) out[t.chapterNumber] = data.publicUrl;
+    } catch { /* non-fatal for thumbs */ }
+    done += 1;
+    onProgress?.(done, thumbs.length);
+  }
+  return out;
+}
+
+
+/**
  * Helper to prepare the list of files from a comic draft (cover + chapters' panels).
  * Returns array ready for uploadComicMediaToStorage.
  */
