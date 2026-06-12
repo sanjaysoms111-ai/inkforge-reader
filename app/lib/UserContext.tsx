@@ -15,6 +15,7 @@ interface Profile {
   id: string;
   display_name: string | null;
   coin_balance: number;
+  created_at?: string;
 }
 
 interface UserContextType {
@@ -27,6 +28,8 @@ interface UserContextType {
   signInWithPassword: (email: string, password: string) => Promise<{ error?: string }>;
   signInWithOAuth: (provider: "google" | "github") => Promise<void>;
   signOut: () => Promise<void>;
+  // Password reset
+  resetPasswordForEmail: (email: string) => Promise<{ error?: string }>;
   // Profile / coins (server-backed)
   refreshProfile: () => Promise<void>;
   coinBalance: number;
@@ -111,7 +114,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
     try {
       const { data, error } = await supabase
         .from("profiles")
-        .select("id, display_name, coin_balance")
+        .select("id, display_name, coin_balance, created_at")
         .eq("id", userId)
         .single();
 
@@ -132,7 +135,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
           .single();
 
         if (inserted) setProfile(inserted as Profile);
-        else setProfile({ id: userId, display_name: starterName, coin_balance: 50 });
+        else setProfile({ id: userId, display_name: starterName, coin_balance: 50, created_at: new Date().toISOString() });
       }
     } catch (e) {
       // Full offline or no table: local starter
@@ -140,6 +143,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
         id: userId,
         display_name: localStorage.getItem("inkforg_apexpanel:displayName") || null,
         coin_balance: 50,
+        created_at: new Date().toISOString(),
       });
     }
 
@@ -185,7 +189,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
     try {
       const { data } = await supabase
         .from("profiles")
-        .select("id, display_name, coin_balance")
+        .select("id, display_name, coin_balance, created_at")
         .eq("id", user.id)
         .single();
       if (data) setProfile(data as Profile);
@@ -195,20 +199,68 @@ export function UserProvider({ children }: { children: ReactNode }) {
   }, [user, supabase]);
 
   const signUp = useCallback(async (email: string, password: string, displayName?: string) => {
-    const { error } = await supabase.auth.signUp({
+    const display = (displayName || email.split("@")[0]).trim();
+
+    const { data: signUpData, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        data: { display_name: displayName || email.split("@")[0] },
+        data: { display_name: display },
       },
     });
     if (error) return { error: error.message };
-    // Profile row will be created on first login via loadProfileAndLocal or DB trigger.
-    return {};
-  }, [supabase]);
+
+    const uid = signUpData.user?.id;
+    if (!uid) return { error: "Signup succeeded but no user id returned." };
+
+    // Explicitly ensure profile row exists immediately (idempotent upsert)
+    try {
+      await supabase
+        .from("profiles")
+        .upsert(
+          {
+            id: uid,
+            display_name: display,
+            coin_balance: 50,
+          },
+          { onConflict: "id" }
+        )
+        .select()
+        .single();
+    } catch (e) {
+      // Table may not exist yet or RLS; load will handle fallback
+      console.warn("[UserContext] profile upsert on signup failed (will retry on login)", e);
+    }
+
+    // Auto-login the user immediately if possible (works when email confirmation is not required)
+    if (signUpData.session) {
+      // Supabase already established a session
+      await loadProfileAndLocal(uid);
+      return { success: true };
+    }
+
+    // Fallback: explicitly sign in with the just-created credentials
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    if (signInError) {
+      // Most common case: email confirmation is required in the Supabase project settings
+      return { error: "Account created! Please check your email for a confirmation link, then sign in." };
+    }
+
+    // Successfully signed in
+    await loadProfileAndLocal(uid);
+    return { success: true };
+  }, [supabase, loadProfileAndLocal]);
 
   const signInWithPassword = useCallback(async (email: string, password: string) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return { error: error.message };
+    return {};
+  }, [supabase]);
+
+  const resetPasswordForEmail = useCallback(async (email: string) => {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: typeof window !== "undefined" ? `${window.location.origin}/auth/callback` : undefined,
+    });
     if (error) return { error: error.message };
     return {};
   }, [supabase]);
@@ -322,6 +374,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
     signInWithPassword,
     signInWithOAuth,
     signOut,
+    resetPasswordForEmail,
     refreshProfile,
     coinBalance,
     isChapterUnlocked,

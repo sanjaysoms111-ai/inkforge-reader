@@ -386,13 +386,15 @@ All additions go through ComicsContext, preserve premium flow and creator comics
 - /login, /signup (public)
 - /auth/callback (internal)
 - /library (middleware-protected; My Library + public discovery)
+- /profile (middleware-protected; full "Inkforge Account" profile with editable name, stats, logout)
 - Existing /creator, /upload now behind middleware (protected) — aligns with "use server where possible for security".
 
 **Testing checklist additions (beyond prior)**:
 - npm run build succeeds (or dev works for new flows; note: reader had pre-existing JSX artifact from monetization removal — isolated to comments render; can be cleaned independently).
 - Visit /login and /signup; create account (email or Google — requires Supabase provider config).
-- After login: Navbar shows coin balance + Library link + logout; display name editor prefers profile.
+- After login: Navbar shows coin balance + Library + Profile links + logout; display name editor prefers profile. Clicking Profile goes to full /profile page.
 - /library loads (protected); tabs function; shows my uploads + note about public.
+- /profile loads (protected); shows editable name, email, coins, join date, stats (comics/chapters/favs), logout. Editing name persists via setDisplayName + Supabase. Stats accurate via context. Logout works.
 - Middleware redirects /library (and /creator /upload) to /login?next=... when anonymous.
 - UserContext loads profile (falls back gracefully pre-schema) and coinBalance.
 - Sign out clears session state.
@@ -650,6 +652,92 @@ This resolves the mismatch between the UI choice and the persisted DB value.
 - Invariants: first-chapter-free, private stays local, creator bridge untouched, hybrid context sole source, UserContext auth, etc. all preserved. The change only affects visibility of chapters on *public* comics for non-owners.
 
 This completes the public comics + chapters sharing story (comics public + chapters readable via the correct RLS + explicit public join in the fetch).
+
+**Strong native "Inkforge Account" signup (this request)**:
+- Email/password is now the **primary and most prominent** path ("Create Inkforge Account" branding).
+- /signup page fully redesigned:
+  - Large branded title "Create your Inkforge Account" + Inkforge iconography.
+  - Required fields: Display Name, Email, Password + Confirm Password.
+  - **Real-time password requirements checklist** (8+ chars, upper, lower, number, special) that lights up green as you type + strength indicator.
+  - Confirm password live match validation.
+  - Loading states, clear error banners, professional glass/dark theme with accent focus rings.
+- Google sign-up kept clearly secondary with label "or continue with Google".
+- `signUp` in UserContext enhanced:
+  - Explicit profile upsert (display_name + 50 starter coins) right on signup.
+  - Auto-login attempt (immediate session if no email confirmation required in Supabase project, or explicit signInWithPassword fallback).
+  - Better structured success / error returns.
+- Post-signup flow:
+  - Shows exact success banner: "Inkforge Account created successfully! Welcome!"
+  - Auto-redirects to /library (user is logged in and profile exists).
+- Professional, ownable "Inkforge Account" feel (not generic "sign up").
+- Error handling, busy states, and graceful fallback for email confirmation projects all preserved.
+- `npm run build` verified clean.
+- AGENTS.md updated.
+
+This makes creating an Inkforge Account feel like a first-class branded experience while still supporting social login as secondary.
+
+**Improved Login page to match new signup quality (this request)**:
+- /login page fully brought up to the professional level of the redesigned /signup.
+- Big branded title: "Sign in to your Inkforge Account" with matching centered Inkforge icon + subtitle.
+- Clean fields: Email + Password (with icons).
+- Added password visibility toggle (Eye / EyeOff icon) inside the password input.
+- Added "Forgot Password?" link (right-aligned under password label) — shows a branded toast "Password reset coming soon!" (placeholder, non-functional as specified).
+- Real-time validation on submit: explicit check for empty email/password with clear error.
+- Loading state on primary button: "Signing in..." (already present, kept consistent).
+- Success flow: direct smooth redirect to the `next` param (defaults to /library for Inkforge experience).
+- Google kept strictly secondary with matching divider text: "or continue with Google" and "Continue with Google" button.
+- Full visual consistency with signup:
+  - Same glass card, input wrappers, focus-within accent borders, text sizes, spacing, and footer notes.
+  - Rose-600 Inkforge icon treatment.
+  - Error banners, disabled states, and dark theme tokens identical.
+- Uses existing signInWithPassword + OAuth from UserContext.
+- Suspense wrapper preserved for useSearchParams.
+- `npm run build` clean.
+- AGENTS.md updated.
+
+The login now feels like a native, high-quality part of the Inkforge Account system.
+
+**Full Forgot Password functionality (this request)**:
+- Replaced the previous placeholder toast with a fully working flow.
+- "Forgot Password?" link (in login page, right-aligned under Password label) now opens a clean centered modal.
+- Modal uses the same glass/dark/accent styling as login and the new signup page (rose icon treatment, input wrappers, btn-primary, error/success cards).
+- Form: single Email field + "Send Password Reset Link" button (with loading state "Sending reset link...").
+- On submit: calls the new `resetPasswordForEmail` in UserContext (which wraps `supabase.auth.resetPasswordForEmail` with proper redirectTo to /auth/callback for the reset link).
+- Success: shows the exact message inside the modal: "Password reset link sent to your email. Please check your inbox (and spam folder)." Plus action buttons "Close" and "Back to Login".
+- Error handling: user-friendly messages (e.g. "No account found with that email..."), plus generic network/auth errors.
+- After success the user can close the modal or return to the login form.
+- Added `resetPasswordForEmail` method to UserContext (following the same async { error? } pattern as other auth methods) and exposed in the context interface/value.
+- Uses AnimatePresence + motion from framer-motion (consistent with other modals like creator edit and upload preview).
+- The flow works for both logged-out users and is protected only by client UX (Supabase handles the actual email sending and token security server-side).
+- `npm run build` clean.
+- AGENTS.md updated.
+
+This completes the core "Inkforge Account" auth experience (signup + login + forgot password) with professional native Supabase integration.
+
+**Full Profile Page (/profile) (this request)**:
+- New protected route `/profile` (middleware already redirects unauthenticated users to /login?next=/profile).
+- Professional "Inkforge Account" branded UI: centered rose icon header, "Your Inkforge Account" title, glass cards, accent highlights, consistent with redesigned login/signup.
+- Account Information card:
+  - Editable Display Name (click Edit → input + Save/Cancel, calls setDisplayName from UserContext, shows success feedback, refreshes).
+  - Email (from Supabase user).
+  - Coins balance (live from coinBalance).
+  - Member Since (join date from profile.created_at or user.created_at, nicely formatted).
+- Activity Stats card (computed live via useComics()):
+  - Comics Uploaded (getMyUploadedComics().length — respects owner_id for Supabase public comics).
+  - Chapters Published (sum of chapters across owned comics).
+  - Favorites (getLikedComics().length with heart icon).
+- Account Actions: prominent "Logout" button (calls signOut + router.push("/")) + quick link back to Library.
+- Uses UserContext heavily (user, profile, setDisplayName, signOut, coinBalance, refreshProfile) + ComicsContext (getMyUploadedComics, getLikedComics).
+- Navbar updated:
+  - Desktop: new "Profile" link (User icon) next to Library in the auth section.
+  - Mobile menu: added "Profile" link in the signed-in section.
+  - (Quick inline name editing in navbar preserved for convenience.)
+- Enhanced UserContext: Profile interface + all load/refresh/select/insert paths now include `created_at` for accurate join dates.
+- Page is fully client-side, graceful loading state, and shows login CTA if somehow accessed unauthenticated.
+- `npm run build` verified (now 14 routes, /profile is ○ static).
+- AGENTS.md updated (this section + quick reference + useful routes).
+
+The /profile page completes the Inkforge Account experience: sign up → login → forgot password → profile management → library.
 
 **Strict author-only edit and delete (this request)**:
 - Goals achieved: Only the comic owner can see/use Edit/Delete buttons (non-owners see nothing). Backend protected by existing RLS (UPDATE/DELETE `owner_id = auth.uid()` on comics + chapters).

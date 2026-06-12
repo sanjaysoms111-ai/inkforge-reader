@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { BookOpen, Menu, X, Sun, Moon, Monitor, Coins, Library, LogOut, LogIn } from "lucide-react";
+import { BookOpen, Menu, X, Sun, Moon, Monitor, Coins, Library, LogOut, LogIn, User } from "lucide-react";
 import { useComics } from "../lib/ComicsContext";
 import { useTheme } from "../lib/ThemeContext";
 import { useUser } from "../lib/UserContext";
@@ -95,6 +95,14 @@ export function Navbar() {
                     <Library size={15} /> Library
                   </Link>
 
+                  {/* Profile link */}
+                  <Link
+                    href="/profile"
+                    className="hidden items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] md:flex"
+                  >
+                    <User size={15} /> Profile
+                  </Link>
+
                   {/* Display name (prefers Supabase profile) */}
                   <div className="flex items-center gap-1.5 text-sm">
                     {showNameInput ? (
@@ -167,6 +175,9 @@ export function Navbar() {
                     </Link>
                     <Link href="/library" className="py-1 text-[var(--text-muted)]" onClick={() => setMobileOpen(false)}>
                       Full Library
+                    </Link>
+                    <Link href="/profile" className="py-1 text-[var(--text-muted)]" onClick={() => setMobileOpen(false)}>
+                      Profile
                     </Link>
                     <button
                       onClick={async () => {

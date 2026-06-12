@@ -56,6 +56,18 @@ export default function MyLibraryPage() {
     }
   }, [user?.id, refreshPublicComics]);
 
+  // One-time welcome toast for brand new Inkforge Accounts
+  useEffect(() => {
+    if (typeof window !== "undefined" && sessionStorage.getItem("inkforge_welcome")) {
+      sessionStorage.removeItem("inkforge_welcome");
+      const toast = document.createElement("div");
+      toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
+      toast.textContent = "Welcome to your Inkforge Account!";
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3200);
+    }
+  }, []);
+
   if (userLoading) {
     return <div className="p-10 text-center text-[var(--text-muted)]">Loading your library...</div>;
   }
