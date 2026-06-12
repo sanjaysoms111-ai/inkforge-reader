@@ -521,6 +521,7 @@ export default function UploadComicPage() {
           tags: publicInput.tags,
           unlockAllPrice: publicInput.unlockAllPrice,
           isPublic: true,
+          owner_id: user?.id,
         };
 
         ingestPublicComic(normalizedPublic);

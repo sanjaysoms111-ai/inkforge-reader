@@ -38,6 +38,12 @@ export default function MyLibraryPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const isOwnerOf = (c: any) => {
+    if (!user) return false;
+    if (c.owner_id) return user.id === c.owner_id;
+    return c.id.startsWith('pub-') || c.source === 'user';
+  };
+
   // Discover filters (only active on discover tab)
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedGenres, setSelectedGenres] = useState<Genre[]>([]);
@@ -116,9 +122,17 @@ export default function MyLibraryPage() {
 
   // Actions for My Uploads
   const handleDelete = (id: string, title: string) => {
-    if (!confirm(`Permanently delete "${title}"?`)) return;
+    if (!confirm(`Permanently delete "${title}"?\n\nThis action cannot be undone and will remove it from your library.`)) return;
     removePublishedComic(id);
     setActionError(null);
+    // Success toast
+    const toast = document.createElement("div");
+    toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
+    toast.textContent = "Comic deleted successfully.";
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2200);
+    // Refresh to update My Uploads + Discover lists
+    refreshPublicComics();
   };
 
   const handlePublishToPublic = async (comic: any) => {
@@ -189,27 +203,32 @@ export default function MyLibraryPage() {
             </div>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-              {myAllUploads.map((c: any) => (
-                <div key={c.id} className="group">
-                  <ComicCard
-                    comic={c}
-                    onDelete={(c.id.startsWith('pub-') || c.source === 'user') ? (id) => handleDelete(id, c.title) : undefined}
-                  />
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                    <button onClick={() => handleEdit(c.id)} className="px-2 py-0.5 rounded border border-[var(--border)] hover:bg-[var(--bg-card)]">Edit</button>
-                    {!c.isPublic && (
-                      <button
-                        onClick={() => handlePublishToPublic(c)}
-                        disabled={isLoading}
-                        className="px-2 py-0.5 rounded border border-emerald-500/60 text-emerald-400 hover:bg-emerald-500/10 disabled:opacity-60"
-                      >
-                        {isLoading ? 'Publishing...' : 'Publish to Public'}
-                      </button>
-                    )}
-                    {c.isPublic && <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[10px]">Public</span>}
+              {myAllUploads.map((c: any) => {
+                const owner = isOwnerOf(c);
+                return (
+                  <div key={c.id} className="group">
+                    <ComicCard
+                      comic={c}
+                      onDelete={owner ? (id) => handleDelete(id, c.title) : undefined}
+                    />
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                      {owner && (
+                        <button onClick={() => handleEdit(c.id)} className="px-2 py-0.5 rounded border border-[var(--border)] hover:bg-[var(--bg-card)]">Edit</button>
+                      )}
+                      {owner && !c.isPublic && (
+                        <button
+                          onClick={() => handlePublishToPublic(c)}
+                          disabled={isLoading}
+                          className="px-2 py-0.5 rounded border border-emerald-500/60 text-emerald-400 hover:bg-emerald-500/10 disabled:opacity-60"
+                        >
+                          {isLoading ? 'Publishing...' : 'Publish to Public'}
+                        </button>
+                      )}
+                      {c.isPublic && <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[10px]">Public</span>}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

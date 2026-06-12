@@ -43,6 +43,7 @@ export interface Comic {
   tags?: string[];
   unlockAllPrice?: number; // custom price to unlock all premium chapters in this comic; defaults to 60
   isPublic?: boolean; // true for comics stored in Supabase (public discovery for logged-in users)
+  owner_id?: string; // Supabase owner (auth.uid()) for strict author-only checks on edit/delete
 }
 
 export interface UserCoinState {

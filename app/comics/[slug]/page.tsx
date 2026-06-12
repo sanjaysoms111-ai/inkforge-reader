@@ -16,6 +16,7 @@ export default function ComicDetailPage() {
   const params = useParams<{ slug: string }>();
   const router = useRouter();
   const { getComicBySlug, removePublishedComic, getCreatorAnalytics, recordCreatorView, shareLink } = useComics();
+  const { user } = useUser();
 
   const comic = getComicBySlug(params.slug);
 
@@ -45,11 +46,10 @@ export default function ComicDetailPage() {
 
   const firstFree = comic.chapters.find((c) => !c.isPremium) || comic.chapters[0];
 
-  // Allow deleting legacy user-published (via removed /publish) and imported creator comics
-  // (these live in the user's local storage)
-  const canDelete = comic.id.startsWith('pub-') || comic.source === 'creator';
+  // Strict author-only: use owner_id when present (Supabase), fallback to legacy source/id for local
+  const canDelete = user && (comic.owner_id ? user.id === comic.owner_id : (comic.id.startsWith('pub-') || comic.source === 'creator' || comic.source === 'user'));
 
-  const { isChapterUnlocked: userIsChapterUnlocked } = useUser ? useUser() : { isChapterUnlocked: () => true } as any;
+  const { isChapterUnlocked: userIsChapterUnlocked } = useUser();
 
   const handleReadChapter = (chapterNumber: number) => {
     router.push(`/read/${comic.slug}/${chapterNumber}`);

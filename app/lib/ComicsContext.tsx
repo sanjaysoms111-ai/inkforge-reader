@@ -304,6 +304,7 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
       tags: row.tags || [],
       unlockAllPrice: row.unlock_all_price,
       isPublic: row.is_public,
+      owner_id: row.owner_id,
     };
   }
 
@@ -684,6 +685,7 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
           title: input.title,
           author: input.author || "You",
           coverUrl: input.coverUrl,
+          owner_id: user?.id, // set for strict author checks even on local publishes
           genres: input.genres,
           description: input.description,
           chapters: newChapters,
@@ -726,14 +728,35 @@ export function ComicsProvider({ children }: { children: ReactNode }) {
         } catch {}
       }
 
+      // For owned public (Supabase) comics, attempt DB delete (RLS enforces owner only)
+      if (comicToRemove?.isPublic && comicToRemove.owner_id && user?.id === comicToRemove.owner_id) {
+        (async () => {
+          try {
+            const supabase = getSupabaseBrowserClient();
+            // Delete chapters first (or rely on cascade, but explicit)
+            await supabase.from('chapters').delete().eq('comic_id', id);
+            await supabase.from('comics').delete().eq('id', id);
+          } catch (e) {
+            console.warn('Supabase delete for owned public comic failed (RLS or network)', e);
+          }
+        })();
+      }
+
       return updated;
     });
-  }, [persistPublished]);
+  }, [persistPublished, user?.id]);
 
   // === Creator Upload Dashboard helpers (user uploads only) ===
   const getMyUploadedComics = useCallback(() => {
-    return comics.filter((c) => c.source === 'user' || c.id.startsWith('pub-'));
-  }, [comics]);
+    return comics.filter((c) => {
+      // Strict owner check for Supabase comics (public or private owned)
+      if (c.owner_id && user?.id) {
+        return c.owner_id === user.id;
+      }
+      // Legacy local uploads and creator bridge
+      return c.source === 'user' || c.id.startsWith('pub-');
+    });
+  }, [comics, user?.id]);
 
   const updateUploadedComic = useCallback((id: string, updates: Partial<Comic>) => {
     setComics((prev) => {

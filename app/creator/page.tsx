@@ -56,6 +56,13 @@ export default function CreatorDashboard() {
 
   const myComics = getMyUploadedComics();
 
+  const isOwnerOf = (comic: any) => {
+    if (!user) return false;
+    if (comic.owner_id) return user.id === comic.owner_id;
+    // legacy local
+    return comic.source === 'user' || comic.id.startsWith('pub-');
+  };
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
   const [processingProgress, setProcessingProgress] = useState<{ current: number; total: number; label: string } | null>(null);
@@ -317,6 +324,7 @@ export default function CreatorDashboard() {
           tags: editDraft.tags,
           unlockAllPrice: editDraft.unlockAllPrice,
           isPublic: true,
+          owner_id: user?.id,
         };
         ingestPublicComic(normalized);
 
@@ -386,10 +394,16 @@ export default function CreatorDashboard() {
     setTimeout(() => setSuccess(null), 2500);
   };
 
-  // Delete (reuses existing)
+  // Delete (reuses existing) - strict owner only via UI, with confirm + toast
   const handleDelete = (id: string, title: string) => {
-    if (!confirm(`Delete "${title}"? This cannot be undone.`)) return;
+    if (!confirm(`Permanently delete "${title}"?\n\nThis action cannot be undone and will remove it from your library.`)) return;
     removePublishedComic(id);
+    // Success toast
+    const toast = document.createElement("div");
+    toast.className = "fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-emerald-600 px-5 py-2 text-sm text-white shadow-lg z-[100]";
+    toast.textContent = "Comic deleted successfully.";
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2200);
   };
 
   return (
@@ -432,58 +446,62 @@ export default function CreatorDashboard() {
                 <div className="relative h-40 bg-[var(--bg-elev)]">
                   <SmartImage src={comic.coverUrl} alt={comic.title} className="w-full h-full object-cover" />
                   <div className="absolute top-2 right-2 flex gap-1">
-                    <button
-                      onClick={() => openEditor(comic)}
-                      className="p-1.5 rounded bg-black/70 text-white hover:bg-[var(--accent)]"
-                      title="Edit this comic"
-                    >
-                      <Edit2 size={14} />
-                    </button>
-                    {! (comic as any).isPublic && user && (
-                      <button
-                        onClick={async () => {
-                          // Quick "make public" from list (uploads current data: + inserts)
-                          if (!confirm(`Publish "${comic.title}" publicly? This will upload images to cloud and make it visible to other logged-in users.`)) return;
-                          // Reuse the open + immediate save public path by forcing the flag
-                          const draft = { ...comic, isPublic: true } as any;
-                          setEditingId(comic.id);
-                          setEditDraft({
-                            title: comic.title,
-                            author: comic.author,
-                            description: comic.description,
-                            genres: [...(comic.genres || [])],
-                            status: comic.status || 'ongoing',
-                            tags: [...(comic.tags || [])],
-                            unlockAllPrice: comic.unlockAllPrice,
-                            chapters: comic.chapters.map(ch => ({ ...ch, panels: [...ch.panels] })),
-                            coverGallery: (comic as any).coverGallery || [],
-                            bannerUrl: (comic as any).bannerUrl || '',
-                            isPublic: true,
-                          });
-                          // Trigger save immediately (the saveEdit now handles the public branch)
-                          // Small delay so state settles
-                          setTimeout(() => { saveEdit(); }, 50);
-                        }}
-                        className="p-1.5 rounded bg-emerald-600/80 text-white hover:bg-emerald-600 text-[10px]"
-                        title="Publish publicly (upload + share)"
-                      >
-                        Pub
-                      </button>
+                    {isOwnerOf(comic) && (
+                      <>
+                        <button
+                          onClick={() => openEditor(comic)}
+                          className="p-1.5 rounded bg-black/70 text-white hover:bg-[var(--accent)]"
+                          title="Edit this comic"
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                        {! (comic as any).isPublic && user && (
+                          <button
+                            onClick={async () => {
+                              // Quick "make public" from list (uploads current data: + inserts)
+                              if (!confirm(`Publish "${comic.title}" publicly? This will upload images to cloud and make it visible to other logged-in users.`)) return;
+                              // Reuse the open + immediate save public path by forcing the flag
+                              const draft = { ...comic, isPublic: true } as any;
+                              setEditingId(comic.id);
+                              setEditDraft({
+                                title: comic.title,
+                                author: comic.author,
+                                description: comic.description,
+                                genres: [...(comic.genres || [])],
+                                status: comic.status || 'ongoing',
+                                tags: [...(comic.tags || [])],
+                                unlockAllPrice: comic.unlockAllPrice,
+                                chapters: comic.chapters.map(ch => ({ ...ch, panels: [...ch.panels] })),
+                                coverGallery: (comic as any).coverGallery || [],
+                                bannerUrl: (comic as any).bannerUrl || '',
+                                isPublic: true,
+                              });
+                              // Trigger save immediately (the saveEdit now handles the public branch)
+                              // Small delay so state settles
+                              setTimeout(() => { saveEdit(); }, 50);
+                            }}
+                            className="p-1.5 rounded bg-emerald-600/80 text-white hover:bg-emerald-600 text-[10px]"
+                            title="Publish publicly (upload + share)"
+                          >
+                            Pub
+                          </button>
+                        )}
+                        <button
+                          onClick={() => exportComic(comic)}
+                          className="p-1.5 rounded bg-black/70 text-white hover:bg-emerald-600"
+                          title="Export as JSON (for inkforg_apexpanel)"
+                        >
+                          <Download size={14} />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(comic.id, comic.title)}
+                          className="p-1.5 rounded bg-black/70 text-white hover:bg-red-600"
+                          title="Delete"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </>
                     )}
-                    <button
-                      onClick={() => exportComic(comic)}
-                      className="p-1.5 rounded bg-black/70 text-white hover:bg-emerald-600"
-                      title="Export as JSON (for inkforg_apexpanel)"
-                    >
-                      <Download size={14} />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(comic.id, comic.title)}
-                      className="p-1.5 rounded bg-black/70 text-white hover:bg-red-600"
-                      title="Delete"
-                    >
-                      <Trash2 size={14} />
-                    </button>
                   </div>
                 </div>
                 <div className="p-3">
@@ -495,21 +513,25 @@ export default function CreatorDashboard() {
                     {comic.source === 'user' && <span className="text-emerald-400">• Your upload</span>}
                   </div>
                   <div className="mt-3 flex gap-2">
-                    <button onClick={() => openEditor(comic)} className="text-xs flex-1 rounded border border-[var(--border)] py-1 hover:bg-[var(--bg-elev)]">Edit</button>
+                    {isOwnerOf(comic) && (
+                      <button onClick={() => openEditor(comic)} className="text-xs flex-1 rounded border border-[var(--border)] py-1 hover:bg-[var(--bg-elev)]">Edit</button>
+                    )}
                     <button onClick={() => exportComic(comic)} className="text-xs flex-1 rounded border border-[var(--border)] py-1 hover:bg-[var(--bg-elev)]">Export JSON</button>
-                    <button 
-                      onClick={() => {
-                        // Publish toggle for user-created comics (persisted via updateUploadedComic; affects "My" visibility emphasis and can be used by filters)
-                        // Use a custom flag to avoid clashing with status enum (ongoing/completed)
-                        const currentlyPublished = !(comic as any).isDraft;
-                        updateUploadedComic(comic.id, { isDraft: !currentlyPublished } as any);
-                        // In real use this could drive a isPublished flag or main list filtering
-                      }} 
-                      className="text-xs px-2 rounded border border-[var(--border)] hover:bg-[var(--bg-elev)]"
-                      title="Toggle whether this appears as 'published' in discovery / My Library emphasis (user comics only)"
-                    >
-                      {(comic as any).isDraft ? 'Publish' : 'Unpublish'}
-                    </button>
+                    {isOwnerOf(comic) && (
+                      <button 
+                        onClick={() => {
+                          // Publish toggle for user-created comics (persisted via updateUploadedComic; affects "My" visibility emphasis and can be used by filters)
+                          // Use a custom flag to avoid clashing with status enum (ongoing/completed)
+                          const currentlyPublished = !(comic as any).isDraft;
+                          updateUploadedComic(comic.id, { isDraft: !currentlyPublished } as any);
+                          // In real use this could drive a isPublished flag or main list filtering
+                        }} 
+                        className="text-xs px-2 rounded border border-[var(--border)] hover:bg-[var(--bg-elev)]"
+                        title="Toggle whether this appears as 'published' in discovery / My Library emphasis (user comics only)"
+                      >
+                        {(comic as any).isDraft ? 'Publish' : 'Unpublish'}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

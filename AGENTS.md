@@ -650,3 +650,21 @@ This resolves the mismatch between the UI choice and the persisted DB value.
 - Invariants: first-chapter-free, private stays local, creator bridge untouched, hybrid context sole source, UserContext auth, etc. all preserved. The change only affects visibility of chapters on *public* comics for non-owners.
 
 This completes the public comics + chapters sharing story (comics public + chapters readable via the correct RLS + explicit public join in the fetch).
+
+**Strict author-only edit and delete (this request)**:
+- Goals achieved: Only the comic owner can see/use Edit/Delete buttons (non-owners see nothing). Backend protected by existing RLS (UPDATE/DELETE `owner_id = auth.uid()` on comics + chapters).
+- Added `owner_id?: string` to Comic type (additive).
+- Updated `normalizeSupabaseComic` to preserve `owner_id` from Supabase rows.
+- Updated `getMyUploadedComics` to filter using `owner_id === user.id` when present (fixes leakage of other users' public comics into "My Uploads").
+- Set `owner_id` on local user publishes and immediate post-public ingests for consistency.
+- Creator Dashboard (/creator): `isOwnerOf(comic)` helper (owner_id or legacy source/pub- fallback). Edit/Delete/Pub buttons in image overlay and bottom actions only rendered if isOwner. handleDelete now has full confirm dialog + "Comic deleted successfully." toast.
+- Library (My Uploads tab): Similar `isOwnerOf`, used for ComicCard onDelete prop and the "Edit" + "Publish to Public" buttons below cards. handleDelete has full confirm + toast + calls `refreshPublicComics()` to update Discover/My lists after delete.
+- Detail page (/comics/[slug]): Updated `canDelete` to strict `user && (owner_id ? match : legacy)`. Already had correct confirm warning + toast + redirect.
+- Frontend safety: Buttons never rendered for non-owners (no "Edit"/trash in cards or lists). Uses UserContext `user.id`.
+- Delete for owned public comics now attempts Supabase .delete() (on comics + chapters) inside removePublishedComic (RLS guarantees only true owner succeeds; others silently fail).
+- Success toast and list refresh implemented.
+- `npm run build` verified clean.
+- Updated AGENTS.md (this note) + kept RLS in DESIGN/SUPABASE_RLS_POLICIES.sql untouched (strong).
+- Invariants preserved: MOCK empty, context sole source (getMy now stricter), creator bridge (source creator protected, no owner_id usually), first ch free, private local data:/LS only, hybrid fetch, etc. Non-owners fully protected at UI layer + DB RLS.
+
+Test: Log in as owner A, upload/public a comic → see Edit/Delete in /creator and /library My Uploads. Log in as B → visit A's public comic in Discover/Library/detail → no Edit/Delete buttons visible. Owner can delete with confirm, gets toast, lists refresh (item gone for everyone). RLS prevents non-owner DB tampering.
